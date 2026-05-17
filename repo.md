@@ -10,13 +10,15 @@ This repository **is** the API service (Node.js + Express + PostgreSQL + Redis).
 - **`npm run db:migrate`**: Applies ordered SQL in [`migrations/`](migrations/) via [`src/db/migrate.ts`](src/db/migrate.ts). Only **`DATABASE_URL`** must be set (same module loads [`src/config/databaseEnv.ts`](src/config/databaseEnv.ts), not the full server env).
 - **`npm test`**: Vitest specs under [`tests/`](tests/); defaults in [`tests/setup/env.ts`](tests/setup/env.ts) seed `DATABASE_URL` and `REDIS_URL` before any `src/` import.
 - **Infra**: Run **Postgres** and **Redis** on the host (or your provider). No Docker in this repo — see [`.env.example`](.env.example).
-- **Docs**: Swagger UI at **`/api-docs`**; canonical spec [`openapi.yaml`](openapi.yaml).
+- **Docs**: Interactive Swagger UI at **`/api-docs`**; source spec [`openapi.yaml`](openapi.yaml). **`GET /openapi.json`** / **`GET /openapi.yaml`** republish it for Postman/codegen/etc. with permissive browser CORS. Restart the process after editing `openapi.yaml` so caches refresh.
 
 ### Layout
 
 | Path | Purpose |
 |------|---------|
-| [`src/http/app.ts`](src/http/app.ts) | Express middleware, routes mount, Swagger UI, JSON error helper |
+| [`src/http/app.ts`](src/http/app.ts) | Express middleware, request logging (`pino-http`), routes, Swagger UI, errors |
+| [`src/logger.ts`](src/logger.ts) | Structured logs (`pino`); **`LOG_LEVEL`** honors `fatal`/`error`/…/`silent`; tests default to silent noise |
+| [`src/http/openapiDocs.routes.ts`](src/http/openapiDocs.routes.ts) | Public **`/openapi.yaml`** and **`/openapi.json`** endpoints |
 | [`src/index.ts`](src/index.ts) | `http.Server` lifecycle, Postgres/Redis connect & shutdown |
 | [`tests/setup/env.ts`](tests/setup/env.ts) | Vitest pre-load env defaults |
 | [`tests/**/*.test.ts`](tests/http/app.test.ts) | Automated tests |

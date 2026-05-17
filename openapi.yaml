@@ -4,11 +4,46 @@ info:
   version: 0.1.0
   description: |
     HTTP API backing agent activity logs and admin summaries.
-    Bootstrap documentation — domain endpoints will land in follow-up milestones.
+
+    Sharing these docs publicly
+
+    Deploy this service, then anyone with the HTTPS URL may use:
+
+    * `/api-docs` — interactive Swagger UI (share link to this path).
+    * `/openapi.json` — OpenAPI 3 JSON (Swagger Editor URL import, Postman, codegen).
+    * `/openapi.yaml` — same spec as YAML.
+
+    Both spec endpoints attach `Access-Control-Allow-Origin: *` so browsers on other sites may fetch the description (Swagger Editor, etc.) as long as your API URL is reachable. Update the `servers` entry below once you pick a canonical base URL (for display only—the server still serves whichever host resolves).
+
+    Offline: paste or upload `openapi.yaml` from repo root into [Swagger Editor](https://editor.swagger.io/).
 servers:
   - url: http://localhost:3000
-    description: Local development
+    description: Local / development (replace after deployment)
 paths:
+  /openapi.yaml:
+    get:
+      tags: [Documentation]
+      summary: OpenAPI 3 YAML document
+      description: Public YAML copy suitable for SCM, Postman URL import where supported.
+      responses:
+        "200":
+          description: OpenAPI YAML
+          content:
+            application/yaml:
+              schema:
+                type: string
+  /openapi.json:
+    get:
+      tags: [Documentation]
+      summary: OpenAPI 3 JSON document
+      description: Public JSON preferred by many toolchain integrations.
+      responses:
+        "200":
+          description: OpenAPI schema as JSON object
+          content:
+            application/json:
+              schema:
+                type: object
   /health:
     get:
       summary: Process health
@@ -51,6 +86,11 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+tags:
+  - name: Documentation
+    description: Public API description files (Swagger / codegen).
+  - name: System
+    description: Operational endpoints
 components:
   schemas:
     ErrorResponse:

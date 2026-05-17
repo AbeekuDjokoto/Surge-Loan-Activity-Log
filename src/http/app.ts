@@ -1,17 +1,14 @@
-import fs from "node:fs";
-import path from "node:path";
-
 import express, {
   type ErrorRequestHandler,
   type RequestHandler,
 } from "express";
+import { pinoHttp } from "pino-http";
 import swaggerUi from "swagger-ui-express";
-import YAML from "yaml";
 
 import { env } from "../config/env";
+import { logger } from "../logger";
 import { apiRouter } from "../routes";
-
-const openapiPath = path.join(process.cwd(), "openapi.yaml");
+import { openapiDocsRouter } from "./openapiDocs.routes";
 
 const corsMiddleware: RequestHandler = (req, res, next) => {
   const origins =
@@ -43,7 +40,7 @@ const corsMiddleware: RequestHandler = (req, res, next) => {
 
 const errorMiddleware: ErrorRequestHandler = (err, _req, res, _next) => {
   void _next;
-  console.error(err);
+  logger.error({ err }, err instanceof Error ? err.message : String(err));
   const message =
     env.NODE_ENV === "production" ? "Internal Server Error" : err.message;
   res.status(500).json({ error: message });
@@ -54,13 +51,34 @@ export function createApp() {
 
   app.disable("x-powered-by");
   app.use(express.json());
+  app.use(
+    pinoHttp({
+      logger,
+      autoLogging: true,
+      customProps: (_req, res) => ({
+        httpStatusCode: res.statusCode,
+      }),
+    })
+  );
+
+  /** Public spec URLs (ACAO *) must come before restrictive CORS for other routes. */
+  app.use(openapiDocsRouter());
+
   app.use(corsMiddleware);
 
   app.use("/", apiRouter);
 
-  const openapiRaw = fs.readFileSync(openapiPath, "utf8");
-  const spec = YAML.parse(openapiRaw) as Record<string, unknown>;
-  app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(spec));
+  app.use(
+    "/api-docs",
+    swaggerUi.serve,
+    swaggerUi.setup(undefined, {
+      swaggerOptions: {
+        url: "/openapi.json",
+        persistAuthorization: true,
+      },
+      customCss: ".swagger-ui .topbar{display:none}",
+    })
+  );
 
   app.use(errorMiddleware);
 

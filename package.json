@@ -18,6 +18,8 @@
   "dependencies": {
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "pino": "^9.9.5",
+    "pino-http": "^10.4.0",
     "pg": "^8.13.3",
     "redis": "^4.7.0",
     "swagger-ui-express": "^5.0.1",

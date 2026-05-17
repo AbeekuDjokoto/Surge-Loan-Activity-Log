@@ -6,7 +6,7 @@ import { pool } from "../../src/db/pool";
 
 const app = createApp();
 
-describe("HTTP /health", () => {
+describe("HTTP surfaces", () => {
   afterAll(async () => {
     await pool.end().catch(() => undefined);
   });
@@ -17,5 +17,12 @@ describe("HTTP /health", () => {
     expect(res.body).toEqual({ status: "ok" });
   });
 
-  // /ready is omitted here so CI does not depend on Postgres/Redis; call it manually when services are up.
+  it("GET /openapi.json publishes spec with permissive docs CORS", async () => {
+    const res = await request(app).get("/openapi.json");
+    expect(res.status).toBe(200);
+    expect(res.headers["access-control-allow-origin"]).toBe("*");
+    expect(res.body.openapi).toBe("3.0.3");
+  });
+
+  // /ready is omitted here so CI does not depend on Postgres/Redis; call manually when services are up.
 });
