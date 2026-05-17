@@ -1,9 +1,21 @@
 openapi: 3.0.3
 info:
   title: Surge Loan Activity Log API
-  version: 0.1.0
+  version: 0.7.0
   description: |
     HTTP API backing agent activity logs and admin summaries.
+
+    Agents (JWT `user` role, not `admin`) submit daily rows via `POST /activity/daily`, edit countable fields via **`PATCH /activity/daily/{daily_activity_id}`**, and list their rows via **`GET /activity/daily/me`**. Admins (`admin` JWT) list everyone via **`GET /activity/daily`** (optional **`agent_uuid`**) and may fetch or patch any activity row. Duplicate `(agent_user_id, update_date)` returns 409 on create or patch.
+
+    Idempotent dev admin provisioning: run `npm run db:seed` after migrations (see `SEED_ADMIN_*` in `.env.example`). Additional admins are invited via **`POST /admin/invites`** (JWT `admin`) and accept via **`POST /auth/accept-admin-invite`**. Invite links use `ADMIN_INVITE_URL_BASE` with `?token=` (similar to password reset).
+
+    **Authentication:** Administrators use the same **`POST /auth/login`**, **`POST /auth/forgot-password`**, and **`POST /auth/reset-password`** flows as agents; the JWT includes role codes from the user record.
+
+    User onboarding exposes `/auth/register` with Argon2id-backed passwords and a short-lived JWT access token in JSON.
+    The rotating refresh token is issued only as an HttpOnly `surge_refresh` cookie (Path `/auth`), not in response bodies, so browser JS cannot read it alongside the access token.
+    Opaque refresh entries live in Redis. Roles (`user`, `admin`) attach at signup or when accepting an admin invite.
+
+    Password reset issues a single-use token (hashed in Postgres); configure SMTP (`EMAIL_MODE=smtp`) or use `EMAIL_MODE=console` locally to log reset links. The SPA URL base is `PASSWORD_RESET_URL_BASE` (query `token=` is appended). Successful reset revokes all refresh sessions for that user in Redis.
 
     Sharing these docs publicly
 
@@ -86,15 +98,1158 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Sign up — default role user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          description: Account created — access JWT JSON plus HttpOnly refresh cookie surge_refresh (not in body)
+          headers:
+            Set-Cookie:
+              description:
+                surge_refresh opaque token HttpOnly SameSite=Lax Path /auth rotates on each login or refresh Secure in production
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessTokensResponse"
+        "409":
+          description: Email already registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Payload validation failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many signup attempts (rate limited)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Email + password login
+      description: |
+        Same endpoint for **agents** and **administrators**; the returned JWT `user.roles` reflect the account (typically `["user"]` for agents or `["admin"]` for admin-only accounts).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CredentialsRequest"
+      responses:
+        "200":
+          description: Access JWT JSON plus HttpOnly refresh cookie surge_refresh
+          headers:
+            Set-Cookie:
+              description:
+                surge_refresh rotates on login or refresh
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessTokensResponse"
+        "401":
+          description: Invalid email or password
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Payload validation failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many attempts (rate limited)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /auth/forgot-password:
+    post:
+      tags: [Auth]
+      summary: Request password reset email
+      description: |
+        Always returns `202` with the same message whether the email is registered (prevents account enumeration).
+        Rate limited more tightly than login. If the account exists, a single-use token is emailed (or logged when `EMAIL_MODE=console`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ForgotPasswordRequest"
+      responses:
+        "202":
+          description: Request accepted — check email if an account exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForgotPasswordResponse"
+        "422":
+          description: Payload validation failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many reset requests (rate limited)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /auth/reset-password:
+    post:
+      tags: [Auth]
+      summary: Set a new password using email token
+      description: |
+        Body carries the raw `token` from the reset link (`?token=`). On success, password is updated, the token is consumed,
+        other pending reset tokens for the user are cleared, and all Redis refresh slots for the user are revoked.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResetPasswordRequest"
+      responses:
+        "204":
+          description: Password updated; token invalidated
+        "400":
+          description: Invalid or expired reset token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Payload validation failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many reset attempts (rate limited)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /auth/accept-admin-invite:
+    post:
+      tags: [Auth]
+      summary: Accept administrator invitation (JWT session issued)
+      description: |
+        Public — no Bearer token. The **`token`** comes from the invite link query string (`ADMIN_INVITE_URL_BASE?token=`).
+        If an account with this email **already exists** (e.g. an agent), send only **`token`** — the user is promoted to **admin-only** (same as `npm run db:seed`: `user` role removed, `admin` assigned). Revokes existing refresh sessions then returns **`AccessTokensResponse`** like register/login.
+        If **no account** exists, also send **`password`**, **`full_name`**, and **`location_station`** (password min 12 characters). On success creates an **admin-only** user (no agent `user` role).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AcceptAdminInviteRequest"
+      responses:
+        "201":
+          description: Admin session established — access JWT JSON plus HttpOnly refresh cookie surge_refresh
+          headers:
+            Set-Cookie:
+              description: surge_refresh opaque refresh token Path `/auth`
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessTokensResponse"
+        "400":
+          description: Invalid or expired invite token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Target is already an administrator, or email already registered (race)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Missing registration fields for a new account, or validation failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many attempts (rate limited)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotate refresh cookie and issue a fresh access JWT
+      description:
+        Requires the surge_refresh cookie from register or login. Send credentials (browser Cookie header). No JSON body.
+      responses:
+        "200":
+          description: Access JWT refreshed; replaces surge_refresh cookie (rotating session)
+          headers:
+            Set-Cookie:
+              description: Updated surge_refresh
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessTokensResponse"
+        "401":
+          description: Missing invalid or revoked refresh cookie
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke Redis refresh slot clear HttpOnly cookie
+      description:
+        Reads surge_refresh cookie if present clears cookie regardless. Idempotent.
+      responses:
+        "204":
+          description: Session slot cleared cookie expired client-side
+          headers:
+            Set-Cookie:
+              description: surge_refresh cleared
+              schema:
+                type: string
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Current user profile — requires Bearer access JWT
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Public profile snapshot (never includes password_hash)
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - user
+                properties:
+                  user:
+                    $ref: "#/components/schemas/UserPublic"
+        "401":
+          description: Missing, malformed, or expired access JWT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: JWT valid but backing user row disappeared
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    patch:
+      tags: [Auth]
+      summary: Update current user profile
+      description: |
+        At least one of `full_name`, `location_station`, or `email` must be provided. Changing `email` clears `email_verified_at` until a future verification flow exists.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchMeRequest"
+      responses:
+        "200":
+          description: Updated public profile
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - user
+                properties:
+                  user:
+                    $ref: "#/components/schemas/UserPublic"
+        "401":
+          description: Missing, malformed, or expired access JWT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: JWT valid but backing user row disappeared
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Updated email already in use
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Payload validation failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /activity/daily/me:
+    get:
+      tags: [Activities]
+      summary: List my daily activity updates — agent only
+      description: |
+        Bearer JWT — requires `user` and must not include `admin`. Rows are scoped to the authenticated user.
+        `summary` aggregates over **all matching rows** (after filters), not only the current page.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ActivityListPage"
+        - $ref: "#/components/parameters/ActivityPageSize"
+        - $ref: "#/components/parameters/ActivityDateFrom"
+        - $ref: "#/components/parameters/ActivityDateTo"
+        - $ref: "#/components/parameters/ActivityLoanMin"
+        - $ref: "#/components/parameters/ActivityLoanMax"
+        - $ref: "#/components/parameters/ActivityLocationFilter"
+        - $ref: "#/components/parameters/ActivityNameFilter"
+      responses:
+        "200":
+          description: Paginated list with summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DailyActivityListResponse"
+        "401":
+          description: Missing malformed or expired access JWT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Caller must be an agent (not administrator)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /activity/daily/{daily_activity_id}:
+    get:
+      tags: [Activities]
+      summary: Get one daily activity row by id
+      description: |
+        **Agents** (`user` without `admin`) may read only rows they own (**`agent_uuid`** = JWT subject).
+        **Admins** may read any row. Response `daily_activity` uses the same shape as items in **`GET /activity/daily`** (**`DailyActivityListRow`**).
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DailyActivityIdPath"
+      responses:
+        "200":
+          description: Single dashboard row
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - daily_activity
+                properties:
+                  daily_activity:
+                    $ref: "#/components/schemas/DailyActivityListRow"
+        "401":
+          description: Missing malformed or expired access JWT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Not the owning agent (admins exempt)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Unknown `daily_activity_id`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Invalid path UUID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    patch:
+      tags: [Activities]
+      summary: Edit daily activity (applications, loan amount, reporting date)
+      description: |
+        Bearer JWT — **agents** (`user` without `admin`) may patch only rows they own (**`agent_user_id`** = JWT subject).
+        **Admins** may patch any row. At least one of **`applications_count`**, **`loan_amount`**, **`update_date`** must be sent.
+        Changing **`update_date`** to a date that already exists for the same agent returns **409**.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DailyActivityIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchDailyActivityRequest"
+      responses:
+        "200":
+          description: Updated row (same shape as create response `daily_activity`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateDailyActivityResponse"
+        "401":
+          description: Missing malformed or expired access JWT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Missing both agent and admin role or not the owning agent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Unknown `daily_activity_id`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Another row already uses this agent and reporting date
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Validation failure invalid path UUID or empty patch body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /activity/daily:
+    post:
+      tags: [Activities]
+      summary: Submit agent daily activity
+      description: |
+        Bearer access JWT required. Callers must be agents (JWT includes `user` and must not include `admin`).
+        `agent_uuid` must equal the JWT subject (authenticated user id). Duplicate `(agent_uuid, update_date)` returns 409.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateDailyActivityRequest"
+      responses:
+        "201":
+          description: Daily activity recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateDailyActivityResponse"
+        "401":
+          description: Missing malformed or expired access JWT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Not an agent forbidden agent_uuid mismatch admin-only account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Activity for this reporting date already exists for this agent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Payload validation failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    get:
+      tags: [Activities]
+      summary: List daily activity updates for all agents — admin only
+      description: |
+        Bearer JWT — requires `admin`. Each **`items`** row is **one calendar reporting day** for one agent
+        (unique `(agent_uuid, date)`). Use it to read **loan application count per day**: field **`applications`**
+        is the count of applications for that agent on **`date`**; **`total_amount`** is total loan amount for that day.
+        Optional **`agent_uuid`** narrows to one agent (still one row per day they reported). Omit **`agent_uuid`** to list all agents—each row includes **`agent_uuid`** / **`agent_full_name`** so you can see every agent’s per-day counts. Use **`date_from`** / **`date_to`** to bound calendar days. **`summary`** aggregates over all matching rows (not only the current page): **`total_applications`** sums **`applications`**, **`total_loan_amount`** sums **`total_amount`**.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ActivityListPage"
+        - $ref: "#/components/parameters/ActivityPageSize"
+        - $ref: "#/components/parameters/ActivityDateFrom"
+        - $ref: "#/components/parameters/ActivityDateTo"
+        - $ref: "#/components/parameters/ActivityLoanMin"
+        - $ref: "#/components/parameters/ActivityLoanMax"
+        - $ref: "#/components/parameters/ActivityLocationFilter"
+        - $ref: "#/components/parameters/ActivityNameFilter"
+        - $ref: "#/components/parameters/ActivityAgentUuidFilter"
+      responses:
+        "200":
+          description: Paginated list with summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DailyActivityListResponse"
+        "401":
+          description: Missing malformed or expired access JWT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Caller is not an admin
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /admin/invites:
+    post:
+      tags: [Admin]
+      summary: Invite a user to become administrator — sends email
+      description: |
+        Requires JWT with **`admin`** role. Idempotent replacement of prior unconsumed invites for the same email.
+        If the email already belongs to an administrator, returns **409**. Invite acceptance is **`POST /auth/accept-admin-invite`**.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+              additionalProperties: false
+              properties:
+                email:
+                  type: string
+                  format: email
+                  maxLength: 320
+      responses:
+        "201":
+          description: Invite row stored and email dispatched when SMTP/console succeeds
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminInviteCreatedResponse"
+        "401":
+          description: Missing or invalid access JWT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Caller is not an admin
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Email is already an administrator
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Validation failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /admin/agents/{agent_uuid}:
+    get:
+      tags: [Admin]
+      summary: Get agent user profile (for admins)
+      description: |
+        Requires **`admin`**. Returns **`UserPublic`** for accounts that are **agents** (have `user` and not `admin`).
+        For that agent’s paginated activity logs with filters and summaries, use **`GET /activity/daily?agent_uuid=`** with the same query parameters as the global admin list.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: agent_uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Target user id (`users.id`) — must be an agent account
+      responses:
+        "200":
+          description: Agent profile
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - user
+                properties:
+                  user:
+                    $ref: "#/components/schemas/UserPublic"
+        "401":
+          description: Missing or invalid access JWT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Caller is not an admin
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: User not found or not an agent account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Invalid UUID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 tags:
   - name: Documentation
     description: Public API description files (Swagger / codegen).
   - name: System
     description: Operational endpoints
+  - name: Auth
+    description: Registration, login, admin invite acceptance, JWT access, HttpOnly refresh rotation, logout, password reset email, and profile read/update
+  - name: Admin
+    description: Administrator-only endpoints (invite users — JWT `admin`)
+  - name: Activities
+    description: Submit (POST), agents list (GET `/daily/me`), admin list (GET `/daily`), get one (GET `/daily/{id}`), patch (PATCH `/daily/{id}`)
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description:
+        Access JWT goes in Authorization Bearer. Obtain it via /auth/register, /auth/login,
+        /auth/accept-admin-invite, or /auth/refresh. Long-lived rotation uses the HttpOnly surge_refresh cookie (never returned in JSON).
+  parameters:
+    ActivityListPage:
+      name: page
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+      description: 1-based page index
+    ActivityPageSize:
+      name: page_size
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+      description: Rows per page (max 100)
+    ActivityDateFrom:
+      name: date_from
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date
+        pattern: '^\\d{4}-\\d{2}-\\d{2}$'
+      description: Inclusive lower bound on reporting `update_date`
+    ActivityDateTo:
+      name: date_to
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date
+        pattern: '^\\d{4}-\\d{2}-\\d{2}$'
+      description: Inclusive upper bound on reporting `update_date` (must be on or after `date_from` when both sent)
+    ActivityLoanMin:
+      name: loan_min
+      in: query
+      required: false
+      schema:
+        type: number
+        format: double
+        minimum: 0
+      description: Inclusive minimum `loan_amount` (total_amount) filter
+    ActivityLoanMax:
+      name: loan_max
+      in: query
+      required: false
+      schema:
+        type: number
+        format: double
+        minimum: 0
+      description: Inclusive maximum loan filter (must be >= `loan_min` when both sent)
+    ActivityLocationFilter:
+      name: location
+      in: query
+      required: false
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 200
+      description: Case-insensitive substring match on stored location
+    ActivityNameFilter:
+      name: name
+      in: query
+      required: false
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 200
+      description: Case-insensitive substring match on agent full name snapshot
+    ActivityAgentUuidFilter:
+      name: agent_uuid
+      in: query
+      required: false
+      schema:
+        type: string
+        format: uuid
+      description: Admin-only — restrict results to one agent (`agent_user_id`)
+    DailyActivityIdPath:
+      name: daily_activity_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Primary key `id` from `daily_activity`
   schemas:
     ErrorResponse:
       type: object
       properties:
         error:
           type: string
+    RegisterRequest:
+      type: object
+      required:
+        - full_name
+        - email
+        - password
+        - location_station
+      properties:
+        full_name:
+          type: string
+          maxLength: 200
+          example: "Jamie Rivera"
+        email:
+          type: string
+          format: email
+          maxLength: 320
+          example: "jamie@example.com"
+        password:
+          type: string
+          minLength: 12
+          maxLength: 200
+          format: password
+          description: Argon2id hash stored server-side; minimum 12 characters in v1
+        location_station:
+          type: string
+          maxLength: 200
+          example: "North Station Desk 4"
+    CredentialsRequest:
+      type: object
+      required:
+        - email
+        - password
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+    ForgotPasswordRequest:
+      type: object
+      required:
+        - email
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 320
+    ForgotPasswordResponse:
+      type: object
+      required:
+        - message
+      properties:
+        message:
+          type: string
+          example: If an account exists for that email, you will receive password reset instructions.
+    ResetPasswordRequest:
+      type: object
+      required:
+        - token
+        - password
+      properties:
+        token:
+          type: string
+          description: Raw token from the reset link query string
+          maxLength: 512
+        password:
+          type: string
+          format: password
+          minLength: 12
+          maxLength: 200
+    AcceptAdminInviteRequest:
+      type: object
+      required:
+        - token
+      additionalProperties: false
+      properties:
+        token:
+          type: string
+          maxLength: 512
+          description: Raw token from the invite link query string
+        password:
+          type: string
+          format: password
+          minLength: 12
+          maxLength: 200
+          description: Required only when creating a new user (email has no account yet)
+        full_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        location_station:
+          type: string
+          minLength: 1
+          maxLength: 200
+    AdminInviteCreatedResponse:
+      type: object
+      required:
+        - email
+        - expires_at
+        - message
+      properties:
+        email:
+          type: string
+          format: email
+        expires_at:
+          type: string
+          format: date-time
+        message:
+          type: string
+          example: Invitation sent when email delivery succeeds.
+    PatchMeRequest:
+      type: object
+      description: At least one property must be present
+      properties:
+        full_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        location_station:
+          type: string
+          minLength: 1
+          maxLength: 200
+        email:
+          type: string
+          format: email
+          maxLength: 320
+      minProperties: 1
+    AccessTokensResponse:
+      type: object
+      description: Access JWT payload only refresh token is never included (HttpOnly cookie instead)
+      required:
+        - user
+        - access_token
+        - expires_in
+      properties:
+        user:
+          $ref: "#/components/schemas/UserPublic"
+        access_token:
+          type: string
+          description: HS256 JWT including roles — short-lived
+        expires_in:
+          type: integer
+          description: Access TTL seconds
+          example: 900
+    UserPublic:
+      type: object
+      required:
+        - id
+        - email
+        - full_name
+        - location_station
+        - roles
+        - email_verified_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        full_name:
+          type: string
+        location_station:
+          type: string
+        roles:
+          type: array
+          items:
+            type: string
+            example: user
+          description: Role codes intersected by `requireRoles` middleware (`user`, seeded `admin` available)
+        email_verified_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Set when SMTP verification arrives (null in onboarding v1)
+    CreateDailyActivityRequest:
+      type: object
+      required:
+        - agent_uuid
+        - agent_full_name
+        - location
+        - applications_count
+        - loan_amount
+        - update_date
+      additionalProperties: false
+      properties:
+        agent_uuid:
+          type: string
+          format: uuid
+          description: Must equal the JWT subject (`user.id`)
+        agent_full_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          example: "Jamie Rivera"
+        location:
+          type: string
+          minLength: 1
+          maxLength: 200
+          example: "North Station Desk 4"
+        applications_count:
+          type: integer
+          minimum: 0
+          example: 8
+        loan_amount:
+          type: number
+          format: double
+          minimum: 0
+          example: 125000.50
+        update_date:
+          type: string
+          format: date
+          pattern: '^\\d{4}-\\d{2}-\\d{2}$'
+          description: Reporting calendar date (YYYY-MM-DD)
+          example: "2026-05-17"
+    PatchDailyActivityRequest:
+      type: object
+      description: At least one property must be present
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        applications_count:
+          type: integer
+          minimum: 0
+          description: Application count for the reporting row
+        loan_amount:
+          type: number
+          format: double
+          minimum: 0
+        update_date:
+          type: string
+          format: date
+          pattern: '^\\d{4}-\\d{2}-\\d{2}$'
+          description: Reporting calendar date (must not collide with another row for this agent)
+    DailyActivityPublic:
+      type: object
+      required:
+        - id
+        - agent_user_id
+        - agent_full_name
+        - location
+        - applications_count
+        - loan_amount
+        - update_date
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        agent_user_id:
+          type: string
+          format: uuid
+        agent_full_name:
+          type: string
+        location:
+          type: string
+        applications_count:
+          type: integer
+          minimum: 0
+        loan_amount:
+          type: number
+          format: double
+          minimum: 0
+        update_date:
+          type: string
+          format: date
+          example: "2026-05-17"
+        created_at:
+          type: string
+          format: date-time
+    CreateDailyActivityResponse:
+      type: object
+      required:
+        - daily_activity
+      properties:
+        daily_activity:
+          $ref: "#/components/schemas/DailyActivityPublic"
+    DailyActivityListRow:
+      type: object
+      description: Snapshot row for dashboards (distinct field names from create response)
+      required:
+        - id
+        - agent_uuid
+        - agent_full_name
+        - location
+        - applications
+        - total_amount
+        - submitted
+        - date
+      properties:
+        id:
+          type: string
+          format: uuid
+        agent_uuid:
+          type: string
+          format: uuid
+        agent_full_name:
+          type: string
+        location:
+          type: string
+        applications:
+          type: integer
+          minimum: 0
+          description: Loan application count for this agent on reporting `date` (stored as `applications_count` on create/patch)
+        total_amount:
+          type: number
+          format: double
+          minimum: 0
+          description: Total loan amount for this agent on reporting `date` (stored as `loan_amount`)
+        submitted:
+          type: string
+          format: date-time
+          description: Submission timestamp (`created_at`)
+        date:
+          type: string
+          format: date
+          description: Reporting `update_date` (YYYY-MM-DD)
+    DailyActivityPagination:
+      type: object
+      required:
+        - page
+        - page_size
+        - total_items
+        - total_pages
+      properties:
+        page:
+          type: integer
+          minimum: 1
+        page_size:
+          type: integer
+          minimum: 1
+          maximum: 100
+        total_items:
+          type: integer
+          minimum: 0
+          description: Count of matching rows across all pages for current filters
+        total_pages:
+          type: integer
+          minimum: 1
+          description: Derived from total_items — at least one page returned even when empty
+    DailyActivitySummary:
+      type: object
+      required:
+        - total_updates
+        - total_loan_amount
+        - total_applications
+      properties:
+        total_updates:
+          type: integer
+          minimum: 0
+          description: Count of matching rows (same denominator as pagination total_items)
+        total_loan_amount:
+          type: number
+          format: double
+          minimum: 0
+          description: Sum of matching `loan_amount` values
+        total_applications:
+          type: integer
+          minimum: 0
+          description: Sum of matching `applications_count` values
+        last_update:
+          type: string
+          format: date-time
+          nullable: true
+          description: Latest `created_at` among matching rows (`null` when no matches)
+    DailyActivityListResponse:
+      type: object
+      required:
+        - items
+        - pagination
+        - summary
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/DailyActivityListRow"
+        pagination:
+          $ref: "#/components/schemas/DailyActivityPagination"
+        summary:
+          $ref: "#/components/schemas/DailyActivitySummary"

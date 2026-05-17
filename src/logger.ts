@@ -8,7 +8,30 @@ function resolveLevel(): string {
   return process.env.NODE_ENV === "production" ? "info" : "debug";
 }
 
-export const logger = pino({
-  level: resolveLevel(),
-  base: undefined,
-});
+function wantsPrettyStdout(): boolean {
+  if (process.env.NODE_ENV === "test") return false;
+  if (process.env.LOG_PRETTY === "0") return false;
+  return (
+    process.env.NODE_ENV === "development" || process.env.LOG_PRETTY === "1"
+  );
+}
+
+/** Human-readable HTTP lines during `NODE_ENV=development` (npm run dev). Disable with LOG_PRETTY=0. */
+export const logger = wantsPrettyStdout()
+  ? pino({
+      level: resolveLevel(),
+      base: undefined,
+      transport: {
+        target: "pino-pretty",
+        options: {
+          colorize: true,
+          translateTime: true,
+          ignore: "pid,hostname",
+          singleLine: true,
+        },
+      },
+    })
+  : pino({
+      level: resolveLevel(),
+      base: undefined,
+    });

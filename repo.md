@@ -8,9 +8,14 @@ This repository **is** the API service (Node.js + Express + PostgreSQL + Redis).
 - **`npm run build`**: Compiles **`src/`** → **`dist/`** (see [`tsconfig.build.json`](tsconfig.build.json)).
 - **`npm start`**: Run compiled server (`node dist/index.js`); run from repo root so [`openapi.yaml`](openapi.yaml) resolves.
 - **`npm run db:migrate`**: Applies ordered SQL in [`migrations/`](migrations/) via [`src/db/migrate.ts`](src/db/migrate.ts). Only **`DATABASE_URL`** must be set (same module loads [`src/config/databaseEnv.ts`](src/config/databaseEnv.ts), not the full server env).
-- **`npm test`**: Vitest specs under [`tests/`](tests/); defaults in [`tests/setup/env.ts`](tests/setup/env.ts) seed `DATABASE_URL` and `REDIS_URL` before any `src/` import.
+- **`npm run db:seed`**: Idempotent bootstrap admin [`src/db/seed.ts`](src/db/seed.ts) — run **after migrate** with **`SEED_ADMIN_*`** in `.env` (see [`.env.example`](.env.example)); grants **`admin`** only for that email (removes **`user`** if it was reassigned).
+- **`npm test`**: Vitest specs under [`tests/`](tests/); defaults in [`tests/setup/env.ts`](tests/setup/env.ts) seed `DATABASE_URL` and `REDIS_URL` before any `src/` import. **`RUN_AUTH_INTEGRATION_TESTS=1`** enables live Postgres+Redis specs in [`tests/auth/auth.routes.integration.test.ts`](tests/auth/auth.routes.integration.test.ts). **`RUN_ACTIVITY_INTEGRATION_TESTS=1`** enables [`tests/activity/dailyActivity.integration.test.ts`](tests/activity/dailyActivity.integration.test.ts) (includes **`GET /activity/daily/{id}`** checks). **`RUN_ADMIN_INTEGRATION_TESTS=1`** enables [`tests/admin/admin.integration.test.ts`](tests/admin/admin.integration.test.ts) (admin invites, accept, **`GET /admin/agents/{id}`**).
 - **Infra**: Run **Postgres** and **Redis** on the host (or your provider). No Docker in this repo — see [`.env.example`](.env.example).
 - **Docs**: Interactive Swagger UI at **`/api-docs`**; source spec [`openapi.yaml`](openapi.yaml). **`GET /openapi.json`** / **`GET /openapi.yaml`** republish it for Postman/codegen/etc. with permissive browser CORS. Restart the process after editing `openapi.yaml` so caches refresh.
+- **Password reset**: `POST /auth/forgot-password` and `POST /auth/reset-password`; configure `EMAIL_MODE`, `PASSWORD_RESET_URL_BASE`, and SMTP vars (see [`.env.example`](.env.example)). Migration [`migrations/003_password_reset_tokens.sql`](migrations/003_password_reset_tokens.sql).
+- **Admin invites**: `POST /admin/invites` (Bearer **`admin`**) sends email; `POST /auth/accept-admin-invite` accepts (`ADMIN_INVITE_URL_BASE`, `ADMIN_INVITE_TOKEN_TTL_HOURS`). Migration [`migrations/005_admin_invites.sql`](migrations/005_admin_invites.sql). Admins use the same **`POST /auth/login`** / forgot / reset flows as agents.
+- **Profile**: `PATCH /auth/me` (Bearer JWT) updates `full_name`, `location_station`, and/or `email`. Admins fetch an agent profile via **`GET /admin/agents/{agent_uuid}`** (target must be `user` without `admin`).
+- **Activities**: `POST /activity/daily` (agents); **`GET /activity/daily/{daily_activity_id}`** (agents own row, admins any); **`PATCH /activity/daily/{id}`** (same rules); **`GET /activity/daily/me`** filtered + paginated self list with **`summary`**; **`GET /activity/daily`** (admins only) lists all agents, optional **`agent_uuid`**, filters, pagination, **`summary`**. OpenAPI **`0.7.0`**.
 
 ### Layout
 
@@ -29,4 +34,4 @@ There is a **single deployed target** (production). **`NODE_ENV`** defaults to *
 
 ### Planned (not implemented yet)
 
-- Agent activity ingestion + admin aggregates, auth separation for two front-end apps.
+- Admin UI for aggregates / summaries (API summaries exist on list endpoints). Daily agent submission lives at **`POST /activity/daily`**.
