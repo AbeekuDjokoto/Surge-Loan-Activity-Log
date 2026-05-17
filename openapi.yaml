@@ -1,0 +1,60 @@
+openapi: 3.0.3
+info:
+  title: Surge Loan Activity Log API
+  version: 0.1.0
+  description: |
+    HTTP API backing agent activity logs and admin summaries.
+    Bootstrap documentation — domain endpoints will land in follow-up milestones.
+servers:
+  - url: http://localhost:3000
+    description: Local development
+paths:
+  /health:
+    get:
+      summary: Process health
+      tags: [System]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+  /ready:
+    get:
+      summary: Dependency readiness (Postgres + Redis)
+      tags: [System]
+      responses:
+        "200":
+          description: Postgres and Redis reachable
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ready
+                  postgres:
+                    type: boolean
+                    example: true
+                  redis:
+                    type: boolean
+                    example: true
+        "500":
+          description: Postgres or Redis unreachable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+components:
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
