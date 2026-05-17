@@ -5,6 +5,14 @@ import { databaseSchema } from "./databaseEnv";
 
 config();
 
+/** Short-lived bearer token durations: e.g. "15m", "1h"; refresh: e.g. "7d", "86400s" (digits + smhd suffix). */
+const durationSuffixSchema = z
+  .string()
+  .regex(
+    /^[1-9]\d*[smhd]$/,
+    "must be digits followed by unit s, m, h, or d (e.g. 15m, 7d)"
+  );
+
 const serverEnvSchema = databaseSchema.extend({
   // Keep `test` for Vitest; optional `development` for local verbose API errors.
   // Deployed builds should use `production`.
@@ -23,6 +31,14 @@ const serverEnvSchema = databaseSchema.extend({
   // Comma-separated browser origins. Required for cross-origin browser access to the API.
   // Same-origin tools (curl, server-side `fetch`, `/api-docs` on this host) work without it.
   CORS_ORIGINS: z.string().optional(),
+  JWT_ACCESS_SECRET: z
+    .string()
+    .min(32, "JWT_ACCESS_SECRET must be at least 32 characters"),
+  JWT_REFRESH_SECRET: z
+    .string()
+    .min(32, "JWT_REFRESH_SECRET must be at least 32 characters"),
+  ACCESS_TOKEN_EXPIRES_IN: durationSuffixSchema.default("15m"),
+  REFRESH_TOKEN_EXPIRES_IN: durationSuffixSchema.default("7d"),
 });
 
 export type Env = z.infer<typeof serverEnvSchema>;

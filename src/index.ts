@@ -1,3 +1,5 @@
+import "./webcrypto-bootstrap";
+
 import { createServer } from "node:http";
 import process from "node:process";
 
@@ -14,7 +16,11 @@ async function main(): Promise<void> {
   await connectRedis();
 
   server.listen(env.PORT, () => {
+    const origin = `http://localhost:${env.PORT}`;
     logger.info({ port: env.PORT }, "HTTP server listening");
+    logger.info(
+      `API docs ${origin}/api-docs | OpenAPI ${origin}/openapi.json | health ${origin}/health`
+    );
   });
 
   async function shutdown(signal: string): Promise<void> {

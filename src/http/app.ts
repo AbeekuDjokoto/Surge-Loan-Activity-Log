@@ -1,3 +1,6 @@
+import "../requestAuth.augment";
+
+import type { IncomingMessage } from "node:http";
 import express, {
   type ErrorRequestHandler,
   type RequestHandler,
@@ -8,7 +11,19 @@ import swaggerUi from "swagger-ui-express";
 import { env } from "../config/env";
 import { logger } from "../logger";
 import { apiRouter } from "../routes";
+import { HttpError } from "./httpError";
 import { openapiDocsRouter } from "./openapiDocs.routes";
+
+function requestPath(req: IncomingMessage): string {
+  const raw = req.url ?? "";
+  const pathOnly = raw.split("?")[0] ?? "";
+  return pathOnly;
+}
+
+/** Swagger UI shells + static assets (/api-docs, /api-docs/*) — omit successful access logs only. */
+function isSwaggerUiPath(path: string): boolean {
+  return path === "/api-docs" || path.startsWith("/api-docs/");
+}
 
 const corsMiddleware: RequestHandler = (req, res, next) => {
   const origins =
@@ -40,6 +55,13 @@ const corsMiddleware: RequestHandler = (req, res, next) => {
 
 const errorMiddleware: ErrorRequestHandler = (err, _req, res, _next) => {
   void _next;
+  if (err instanceof HttpError) {
+    if (err.statusCode >= 500)
+      logger.error({ err }, err.message);
+    res.status(err.statusCode).json({ error: err.message });
+    return;
+  }
+
   logger.error({ err }, err instanceof Error ? err.message : String(err));
   const message =
     env.NODE_ENV === "production" ? "Internal Server Error" : err.message;
@@ -54,10 +76,28 @@ export function createApp() {
   app.use(
     pinoHttp({
       logger,
-      autoLogging: true,
-      customProps: (_req, res) => ({
-        httpStatusCode: res.statusCode,
-      }),
+      autoLogging: {
+        ignore(req) {
+          return isSwaggerUiPath(requestPath(req));
+        },
+      },
+      customSuccessMessage(req, res, responseTime) {
+        return `${req.method ?? "?"} ${requestPath(req)} ${res.statusCode} ${Math.round(responseTime)}ms`;
+      },
+      serializers: {
+        req(req) {
+          return {
+            id: req.id,
+            method: req.method,
+            url: req.url,
+          };
+        },
+        res(res) {
+          return {
+            statusCode: res.statusCode,
+          };
+        },
+      },
     })
   );
 
@@ -75,6 +115,10 @@ export function createApp() {
       swaggerOptions: {
         url: "/openapi.json",
         persistAuthorization: true,
+        requestInterceptor: (request: Record<string, unknown>) => {
+          request.credentials = "include";
+          return request;
+        },
       },
       customCss: ".swagger-ui .topbar{display:none}",
     })

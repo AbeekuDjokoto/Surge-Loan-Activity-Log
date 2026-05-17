@@ -1,16 +1,11 @@
 import request from "supertest";
-import { afterAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { createApp } from "../../src/http/app";
-import { pool } from "../../src/db/pool";
 
 const app = createApp();
 
 describe("HTTP surfaces", () => {
-  afterAll(async () => {
-    await pool.end().catch(() => undefined);
-  });
-
   it("GET /health responds 200", async () => {
     const res = await request(app).get("/health");
     expect(res.status).toBe(200);
