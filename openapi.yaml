@@ -609,8 +609,10 @@ paths:
       tags: [Activities]
       summary: List daily activity updates for all agents — admin only
       description: |
-        Bearer JWT — requires `admin`. Optional **`agent_uuid`** narrows rows to one agent.
-        **`summary`** reflects all rows matching filters (excluding pagination).
+        Bearer JWT — requires `admin`. Each **`items`** row is **one calendar reporting day** for one agent
+        (unique `(agent_uuid, date)`). Use it to read **loan application count per day**: field **`applications`**
+        is the count of applications for that agent on **`date`**; **`total_amount`** is total loan amount for that day.
+        Optional **`agent_uuid`** narrows to one agent (still one row per day they reported). Omit **`agent_uuid`** to list all agents—each row includes **`agent_uuid`** / **`agent_full_name`** so you can see every agent’s per-day counts. Use **`date_from`** / **`date_to`** to bound calendar days. **`summary`** aggregates over all matching rows (not only the current page): **`total_applications`** sums **`applications`**, **`total_loan_amount`** sums **`total_amount`**.
       security:
         - bearerAuth: []
       parameters:
@@ -1174,12 +1176,12 @@ components:
         applications:
           type: integer
           minimum: 0
-          description: Stored `applications_count` at submission time
+          description: Loan application count for this agent on reporting `date` (stored as `applications_count` on create/patch)
         total_amount:
           type: number
           format: double
           minimum: 0
-          description: Stored `loan_amount` at submission time
+          description: Total loan amount for this agent on reporting `date` (stored as `loan_amount`)
         submitted:
           type: string
           format: date-time
