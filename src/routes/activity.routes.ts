@@ -5,6 +5,8 @@ import {
   DuplicateDailyActivityConflict,
   insertDailyActivity,
   paginateDailyActivity,
+  selectAgentUserIdForDailyActivity,
+  updateDailyActivityPartial,
   type DailyActivityListFilters,
 } from "../db/dailyActivityQueries";
 import { authenticate, requireAdmin, requireAgent } from "../http/authMiddleware";
@@ -28,6 +30,24 @@ const isoDateSchema = z
   .string()
   .regex(isoDateRegex, "must be YYYY-MM-DD")
   .refine(isCalendarDateLogical, { message: "not a valid calendar date" });
+
+/** Editable POST fields for agents/admins — at least one key required */
+const patchDailyActivityBodySchema = z
+  .object({
+    applications_count: z.coerce.number().int().nonnegative().optional(),
+    loan_amount: z.coerce.number().finite().nonnegative().optional(),
+    update_date: isoDateSchema.optional(),
+  })
+  .strict()
+  .refine(
+    (b) =>
+      b.applications_count !== undefined ||
+      b.loan_amount !== undefined ||
+      b.update_date !== undefined,
+    {
+      message: "At least one of applications_count, loan_amount, update_date is required",
+    }
+  );
 
 const dailyActivityBodySchema = z
   .object({
@@ -179,6 +199,64 @@ activityRouter.post(
       next(err);
     }
   }
+);
+
+activityRouter.patch(
+  "/daily/:daily_activity_id",
+  authenticate,
+  async (req, res, next) => {
+    try {
+      const uuidSchema = z.string().uuid();
+      const idParsed = uuidSchema.safeParse(req.params.daily_activity_id ?? "");
+      if (!idParsed.success) {
+        throw new HttpError(422, "Invalid daily_activity_id: UUID expected");
+      }
+      const activityId = idParsed.data;
+
+      const bodyParsed = patchDailyActivityBodySchema.safeParse(req.body ?? {});
+      if (!bodyParsed.success) throw mapZodError(bodyParsed.error);
+
+      const auth = req.auth;
+      if (!auth) {
+        throw new HttpError(401, "Not authenticated");
+      }
+
+      const isAdmin = auth.roles.includes("admin");
+      const isAgentEligible =
+        auth.roles.includes("user") && !auth.roles.includes("admin");
+
+      if (!isAdmin && !isAgentEligible) {
+        throw new HttpError(403, "Insufficient permissions");
+      }
+
+      const ownerId = await selectAgentUserIdForDailyActivity(activityId);
+      if (ownerId === null) {
+        throw new HttpError(404, "Daily activity not found");
+      }
+
+      if (!isAdmin && ownerId !== auth.userId) {
+        throw new HttpError(
+          403,
+          "You can only edit your own daily activity",
+        );
+      }
+
+      const daily_activity = await updateDailyActivityPartial({
+        activityId,
+        applicationsCount: bodyParsed.data.applications_count,
+        loanAmount: bodyParsed.data.loan_amount,
+        updateDateIso: bodyParsed.data.update_date,
+      }).catch((err: unknown) => {
+        if (err instanceof DuplicateDailyActivityConflict)
+          throw new HttpError(409, err.message);
+        throw err;
+      });
+
+      res.status(200).json({ daily_activity });
+    } catch (err) {
+      next(err);
+    }
+  },
 );
 
 activityRouter.get(

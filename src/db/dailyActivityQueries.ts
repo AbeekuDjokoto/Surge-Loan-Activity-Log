@@ -226,6 +226,74 @@ export async function paginateDailyActivity(params: {
   };
 }
 
+/** Returns owning agent UUID for `daily_activity` row or null when id does not exist. */
+export async function selectAgentUserIdForDailyActivity(
+  activityId: string
+): Promise<string | null> {
+  const { rows } = await pool.query<{ agent_user_id: string }>(
+    `SELECT agent_user_id FROM daily_activity WHERE id = $1::uuid`,
+    [activityId]
+  );
+  return rows[0]?.agent_user_id ?? null;
+}
+
+export type PatchDailyActivityInput = {
+  activityId: string;
+  applicationsCount?: number | undefined;
+  loanAmount?: number | undefined;
+  updateDateIso?: string | undefined;
+};
+
+export async function updateDailyActivityPartial(
+  patch: PatchDailyActivityInput
+): Promise<ReturnType<typeof rowToDailyActivityPublic>> {
+  const fragments: string[] = [];
+  const values: unknown[] = [];
+  let i = 1;
+
+  if (patch.applicationsCount !== undefined) {
+    fragments.push(`applications_count = $${i++}`);
+    values.push(patch.applicationsCount);
+  }
+  if (patch.loanAmount !== undefined) {
+    fragments.push(`loan_amount = $${i++}`);
+    values.push(patch.loanAmount);
+  }
+  if (patch.updateDateIso !== undefined) {
+    fragments.push(`update_date = $${i++}::date`);
+    values.push(patch.updateDateIso);
+  }
+
+  if (fragments.length === 0) {
+    throw new Error("updateDailyActivityPartial called without fields");
+  }
+
+  values.push(patch.activityId);
+  try {
+    const { rows } = await pool.query<DailyActivityRowDb>(
+      `
+      UPDATE daily_activity
+      SET ${fragments.join(", ")}
+      WHERE id = $${i}::uuid
+      RETURNING id, agent_user_id, agent_full_name, location, applications_count,
+                loan_amount::text AS loan_amount, update_date::text AS update_date_text, created_at
+      `,
+      values,
+    );
+    const row = rows[0];
+    if (!row) throw new Error("unexpected empty RETURNING after UPDATE daily_activity");
+    return rowToDailyActivityPublic(row);
+  } catch (err) {
+    if (
+      err instanceof DatabaseError &&
+      err.code === "23505"
+    ) {
+      throw new DuplicateDailyActivityConflict();
+    }
+    throw err;
+  }
+}
+
 export async function insertDailyActivity(
   params: InsertDailyActivityInput
 ): Promise<ReturnType<typeof rowToDailyActivityPublic>> {

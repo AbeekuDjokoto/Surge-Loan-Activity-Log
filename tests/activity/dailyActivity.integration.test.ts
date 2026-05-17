@@ -168,6 +168,86 @@ describe.skipIf(!SHOULD_RUN_ACTIVITY)("Activity /activity integration", () => {
     });
   });
 
+  describe("PATCH /activity/daily/:id", () => {
+    it("agent updates applications_count and loan_amount on own row", async () => {
+      const agent = await signupAgent();
+      const created = await request(app)
+        .post("/activity/daily")
+        .set("Authorization", `Bearer ${agent.token}`)
+        .send(dailyBody(agent, { update_date: "2026-08-01" }));
+      expect(created.status).toBe(201);
+      const id = created.body.daily_activity.id as string;
+
+      const patched = await request(app)
+        .patch(`/activity/daily/${id}`)
+        .set("Authorization", `Bearer ${agent.token}`)
+        .send({ applications_count: 42, loan_amount: 777.77 });
+
+      expect(patched.status).toBe(200);
+      expect(patched.body.daily_activity.applications_count).toBe(42);
+      expect(patched.body.daily_activity.loan_amount).toBeCloseTo(777.77, 2);
+      expect(patched.body.daily_activity.update_date).toBe("2026-08-01");
+    });
+
+    it("409 when patch update_date conflicts with existing row same agent", async () => {
+      const agent = await signupAgent();
+      await request(app)
+        .post("/activity/daily")
+        .set("Authorization", `Bearer ${agent.token}`)
+        .send(dailyBody(agent, { update_date: "2026-09-01" }))
+        .expect(201);
+
+      const second = await request(app)
+        .post("/activity/daily")
+        .set("Authorization", `Bearer ${agent.token}`)
+        .send(dailyBody(agent, { update_date: "2026-09-02" }))
+        .expect(201);
+      const id = second.body.daily_activity.id as string;
+
+      const clash = await request(app)
+        .patch(`/activity/daily/${id}`)
+        .set("Authorization", `Bearer ${agent.token}`)
+        .send({ update_date: "2026-09-01" });
+
+      expect(clash.status).toBe(409);
+    });
+
+    it("403 when agent edits another agent row admin can succeed", async () => {
+      const adminToken = await signupAdminOnlyToken();
+      const a = await signupAgent();
+      const b = await signupAgent();
+
+      const rowB = await request(app)
+        .post("/activity/daily")
+        .set("Authorization", `Bearer ${b.token}`)
+        .send(dailyBody(b, { update_date: "2026-10-02" }))
+        .expect(201);
+      const idB = rowB.body.daily_activity.id as string;
+
+      const forbidden = await request(app)
+        .patch(`/activity/daily/${idB}`)
+        .set("Authorization", `Bearer ${a.token}`)
+        .send({ applications_count: 1 });
+      expect(forbidden.status).toBe(403);
+
+      const allowed = await request(app)
+        .patch(`/activity/daily/${idB}`)
+        .set("Authorization", `Bearer ${adminToken}`)
+        .send({ loan_amount: 100 });
+      expect(allowed.status).toBe(200);
+      expect(Number(allowed.body.daily_activity.loan_amount)).toBeCloseTo(100, 2);
+    });
+
+    it("422 invalid path id", async () => {
+      const agent = await signupAgent();
+      const res = await request(app)
+        .patch("/activity/daily/not-a-uuid")
+        .set("Authorization", `Bearer ${agent.token}`)
+        .send({ applications_count: 1 });
+      expect(res.status).toBe(422);
+    });
+  });
+
   describe("GET /activity/daily/me and GET /activity/daily", () => {
     it("pagination and summary aggregates on filtered set", async () => {
       const agent = await signupAgent();

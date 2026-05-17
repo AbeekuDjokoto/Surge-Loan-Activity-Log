@@ -14,7 +14,7 @@ This repository **is** the API service (Node.js + Express + PostgreSQL + Redis).
 - **Docs**: Interactive Swagger UI at **`/api-docs`**; source spec [`openapi.yaml`](openapi.yaml). **`GET /openapi.json`** / **`GET /openapi.yaml`** republish it for Postman/codegen/etc. with permissive browser CORS. Restart the process after editing `openapi.yaml` so caches refresh.
 - **Password reset**: `POST /auth/forgot-password` and `POST /auth/reset-password`; configure `EMAIL_MODE`, `PASSWORD_RESET_URL_BASE`, and SMTP vars (see [`.env.example`](.env.example)). Migration [`migrations/003_password_reset_tokens.sql`](migrations/003_password_reset_tokens.sql).
 - **Profile**: `PATCH /auth/me` (Bearer JWT) updates `full_name`, `location_station`, and/or `email`.
-- **Activities**: `POST /activity/daily` (agents); **`GET /activity/daily/me`** filtered + paginated self list with **`summary`**; **`GET /activity/daily`** (admins only) lists all agents, optional **`agent_uuid`**. OpenAPI **`0.5.0`**.
+- **Activities**: `POST /activity/daily` (agents); **`PATCH /activity/daily/{id}`** (agents own rows, admins any); **`GET /activity/daily/me`** filtered + paginated self list with **`summary`**; **`GET /activity/daily`** (admins only) lists all agents, optional **`agent_uuid`**. OpenAPI **`0.6.0`**.
 
 ### Layout
 

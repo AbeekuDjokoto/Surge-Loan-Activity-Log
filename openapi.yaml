@@ -1,11 +1,11 @@
 openapi: 3.0.3
 info:
   title: Surge Loan Activity Log API
-  version: 0.5.0
+  version: 0.6.0
   description: |
     HTTP API backing agent activity logs and admin summaries.
 
-    Agents (JWT `user` role, not `admin`) submit daily rows via `POST /activity/daily`. They list only their rows with filters and summaries via **`GET /activity/daily/me`**. Admins (`admin` JWT) list all agents (**`GET /activity/daily`**, optional **`agent_uuid`**) with the same filters, pagination, and aggregate **`summary`** (totals scoped to matching filters).
+    Agents (JWT `user` role, not `admin`) submit daily rows via `POST /activity/daily`, edit countable fields via **`PATCH /activity/daily/{daily_activity_id}`**, and list their rows via **`GET /activity/daily/me`**. Admins (`admin` JWT) list everyone via **`GET /activity/daily`** (optional **`agent_uuid`**) and may patch any activity row. Duplicate `(agent_user_id, update_date)` returns 409 on create or patch.
 
     Idempotent dev admin provisioning: run `npm run db:seed` after migrations (see `SEED_ADMIN_*` in `.env.example`).
 
@@ -404,6 +404,61 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /activity/daily/{daily_activity_id}:
+    patch:
+      tags: [Activities]
+      summary: Edit daily activity (applications, loan amount, reporting date)
+      description: |
+        Bearer JWT — **agents** (`user` without `admin`) may patch only rows they own (**`agent_user_id`** = JWT subject).
+        **Admins** may patch any row. At least one of **`applications_count`**, **`loan_amount`**, **`update_date`** must be sent.
+        Changing **`update_date`** to a date that already exists for the same agent returns **409**.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DailyActivityIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchDailyActivityRequest"
+      responses:
+        "200":
+          description: Updated row (same shape as create response `daily_activity`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateDailyActivityResponse"
+        "401":
+          description: Missing malformed or expired access JWT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Missing both agent and admin role or not the owning agent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Unknown `daily_activity_id`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Another row already uses this agent and reporting date
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Validation failure invalid path UUID or empty patch body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /activity/daily:
     post:
       tags: [Activities]
@@ -501,7 +556,7 @@ tags:
   - name: Auth
     description: Registration, login, JWT access, HttpOnly refresh rotation, logout, password reset email, and profile read/update
   - name: Activities
-    description: Agent daily activity (submit; agents GET `/daily/me`; admins GET `/daily`)
+    description: Submit (POST), agents list (GET `/daily/me`), admin list (GET `/daily`), patch (PATCH `/daily/{id}`)
 components:
   securitySchemes:
     bearerAuth:
@@ -593,6 +648,14 @@ components:
         type: string
         format: uuid
       description: Admin-only — restrict results to one agent (`agent_user_id`)
+    DailyActivityIdPath:
+      name: daily_activity_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Primary key `id` from `daily_activity`
   schemas:
     ErrorResponse:
       type: object
@@ -774,6 +837,25 @@ components:
           pattern: '^\\d{4}-\\d{2}-\\d{2}$'
           description: Reporting calendar date (YYYY-MM-DD)
           example: "2026-05-17"
+    PatchDailyActivityRequest:
+      type: object
+      description: At least one property must be present
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        applications_count:
+          type: integer
+          minimum: 0
+          description: Application count for the reporting row
+        loan_amount:
+          type: number
+          format: double
+          minimum: 0
+        update_date:
+          type: string
+          format: date
+          pattern: '^\\d{4}-\\d{2}-\\d{2}$'
+          description: Reporting calendar date (must not collide with another row for this agent)
     DailyActivityPublic:
       type: object
       required:
