@@ -52,3 +52,23 @@ export function requireRoles(...allowedRoles: string[]): RequestHandler {
     next();
   };
 }
+
+/**
+ * After `authenticate`: non-admin users with the `user` role (signup default).
+ * Admins cannot submit agent daily activity via this middleware.
+ */
+export const requireAgent: RequestHandler = (req, _res: Response, next: NextFunction) => {
+  if (!req.auth) {
+    next(new HttpError(401, "Not authenticated"));
+    return;
+  }
+  if (req.auth.roles.includes("admin")) {
+    next(new HttpError(403, "Admins cannot submit agent activity"));
+    return;
+  }
+  if (!req.auth.roles.includes("user")) {
+    next(new HttpError(403, "Insufficient permissions"));
+    return;
+  }
+  next();
+};
