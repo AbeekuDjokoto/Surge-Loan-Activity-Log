@@ -1,17 +1,19 @@
 openapi: 3.0.3
 info:
   title: Surge Loan Activity Log API
-  version: 0.6.0
+  version: 0.7.0
   description: |
     HTTP API backing agent activity logs and admin summaries.
 
-    Agents (JWT `user` role, not `admin`) submit daily rows via `POST /activity/daily`, edit countable fields via **`PATCH /activity/daily/{daily_activity_id}`**, and list their rows via **`GET /activity/daily/me`**. Admins (`admin` JWT) list everyone via **`GET /activity/daily`** (optional **`agent_uuid`**) and may patch any activity row. Duplicate `(agent_user_id, update_date)` returns 409 on create or patch.
+    Agents (JWT `user` role, not `admin`) submit daily rows via `POST /activity/daily`, edit countable fields via **`PATCH /activity/daily/{daily_activity_id}`**, and list their rows via **`GET /activity/daily/me`**. Admins (`admin` JWT) list everyone via **`GET /activity/daily`** (optional **`agent_uuid`**) and may fetch or patch any activity row. Duplicate `(agent_user_id, update_date)` returns 409 on create or patch.
 
-    Idempotent dev admin provisioning: run `npm run db:seed` after migrations (see `SEED_ADMIN_*` in `.env.example`).
+    Idempotent dev admin provisioning: run `npm run db:seed` after migrations (see `SEED_ADMIN_*` in `.env.example`). Additional admins are invited via **`POST /admin/invites`** (JWT `admin`) and accept via **`POST /auth/accept-admin-invite`**. Invite links use `ADMIN_INVITE_URL_BASE` with `?token=` (similar to password reset).
+
+    **Authentication:** Administrators use the same **`POST /auth/login`**, **`POST /auth/forgot-password`**, and **`POST /auth/reset-password`** flows as agents; the JWT includes role codes from the user record.
 
     User onboarding exposes `/auth/register` with Argon2id-backed passwords and a short-lived JWT access token in JSON.
     The rotating refresh token is issued only as an HttpOnly `surge_refresh` cookie (Path `/auth`), not in response bodies, so browser JS cannot read it alongside the access token.
-    Opaque refresh entries live in Redis. Roles (`user`, `admin`) attach at signup; elevate admins via DB or a future admin API.
+    Opaque refresh entries live in Redis. Roles (`user`, `admin`) attach at signup or when accepting an admin invite.
 
     Password reset issues a single-use token (hashed in Postgres); configure SMTP (`EMAIL_MODE=smtp`) or use `EMAIL_MODE=console` locally to log reset links. The SPA URL base is `PASSWORD_RESET_URL_BASE` (query `token=` is appended). Successful reset revokes all refresh sessions for that user in Redis.
 
@@ -141,6 +143,8 @@ paths:
     post:
       tags: [Auth]
       summary: Email + password login
+      description: |
+        Same endpoint for **agents** and **administrators**; the returned JWT `user.roles` reflect the account (typically `["user"]` for agents or `["admin"]` for admin-only accounts).
       requestBody:
         required: true
         content:
@@ -240,6 +244,56 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "429":
           description: Too many reset attempts (rate limited)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /auth/accept-admin-invite:
+    post:
+      tags: [Auth]
+      summary: Accept administrator invitation (JWT session issued)
+      description: |
+        Public — no Bearer token. The **`token`** comes from the invite link query string (`ADMIN_INVITE_URL_BASE?token=`).
+        If an account with this email **already exists** (e.g. an agent), send only **`token`** — the user is promoted to **admin-only** (same as `npm run db:seed`: `user` role removed, `admin` assigned). Revokes existing refresh sessions then returns **`AccessTokensResponse`** like register/login.
+        If **no account** exists, also send **`password`**, **`full_name`**, and **`location_station`** (password min 12 characters). On success creates an **admin-only** user (no agent `user` role).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AcceptAdminInviteRequest"
+      responses:
+        "201":
+          description: Admin session established — access JWT JSON plus HttpOnly refresh cookie surge_refresh
+          headers:
+            Set-Cookie:
+              description: surge_refresh opaque refresh token Path `/auth`
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessTokensResponse"
+        "400":
+          description: Invalid or expired invite token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Target is already an administrator, or email already registered (race)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Missing registration fields for a new account, or validation failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many attempts (rate limited)
           content:
             application/json:
               schema:
@@ -405,6 +459,52 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
   /activity/daily/{daily_activity_id}:
+    get:
+      tags: [Activities]
+      summary: Get one daily activity row by id
+      description: |
+        **Agents** (`user` without `admin`) may read only rows they own (**`agent_uuid`** = JWT subject).
+        **Admins** may read any row. Response `daily_activity` uses the same shape as items in **`GET /activity/daily`** (**`DailyActivityListRow`**).
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DailyActivityIdPath"
+      responses:
+        "200":
+          description: Single dashboard row
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - daily_activity
+                properties:
+                  daily_activity:
+                    $ref: "#/components/schemas/DailyActivityListRow"
+        "401":
+          description: Missing malformed or expired access JWT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Not the owning agent (admins exempt)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Unknown `daily_activity_id`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Invalid path UUID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
     patch:
       tags: [Activities]
       summary: Edit daily activity (applications, loan amount, reporting date)
@@ -548,15 +648,124 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /admin/invites:
+    post:
+      tags: [Admin]
+      summary: Invite a user to become administrator — sends email
+      description: |
+        Requires JWT with **`admin`** role. Idempotent replacement of prior unconsumed invites for the same email.
+        If the email already belongs to an administrator, returns **409**. Invite acceptance is **`POST /auth/accept-admin-invite`**.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+              additionalProperties: false
+              properties:
+                email:
+                  type: string
+                  format: email
+                  maxLength: 320
+      responses:
+        "201":
+          description: Invite row stored and email dispatched when SMTP/console succeeds
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminInviteCreatedResponse"
+        "401":
+          description: Missing or invalid access JWT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Caller is not an admin
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Email is already an administrator
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Validation failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /admin/agents/{agent_uuid}:
+    get:
+      tags: [Admin]
+      summary: Get agent user profile (for admins)
+      description: |
+        Requires **`admin`**. Returns **`UserPublic`** for accounts that are **agents** (have `user` and not `admin`).
+        For that agent’s paginated activity logs with filters and summaries, use **`GET /activity/daily?agent_uuid=`** with the same query parameters as the global admin list.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: agent_uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Target user id (`users.id`) — must be an agent account
+      responses:
+        "200":
+          description: Agent profile
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - user
+                properties:
+                  user:
+                    $ref: "#/components/schemas/UserPublic"
+        "401":
+          description: Missing or invalid access JWT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Caller is not an admin
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: User not found or not an agent account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Invalid UUID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 tags:
   - name: Documentation
     description: Public API description files (Swagger / codegen).
   - name: System
     description: Operational endpoints
   - name: Auth
-    description: Registration, login, JWT access, HttpOnly refresh rotation, logout, password reset email, and profile read/update
+    description: Registration, login, admin invite acceptance, JWT access, HttpOnly refresh rotation, logout, password reset email, and profile read/update
+  - name: Admin
+    description: Administrator-only endpoints (invite users — JWT `admin`)
   - name: Activities
-    description: Submit (POST), agents list (GET `/daily/me`), admin list (GET `/daily`), patch (PATCH `/daily/{id}`)
+    description: Submit (POST), agents list (GET `/daily/me`), admin list (GET `/daily`), get one (GET `/daily/{id}`), patch (PATCH `/daily/{id}`)
 components:
   securitySchemes:
     bearerAuth:
@@ -565,7 +774,7 @@ components:
       bearerFormat: JWT
       description:
         Access JWT goes in Authorization Bearer. Obtain it via /auth/register, /auth/login,
-        or /auth/refresh. Long-lived rotation uses the HttpOnly surge_refresh cookie (never returned in JSON).
+        /auth/accept-admin-invite, or /auth/refresh. Long-lived rotation uses the HttpOnly surge_refresh cookie (never returned in JSON).
   parameters:
     ActivityListPage:
       name: page
@@ -732,6 +941,46 @@ components:
           format: password
           minLength: 12
           maxLength: 200
+    AcceptAdminInviteRequest:
+      type: object
+      required:
+        - token
+      additionalProperties: false
+      properties:
+        token:
+          type: string
+          maxLength: 512
+          description: Raw token from the invite link query string
+        password:
+          type: string
+          format: password
+          minLength: 12
+          maxLength: 200
+          description: Required only when creating a new user (email has no account yet)
+        full_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        location_station:
+          type: string
+          minLength: 1
+          maxLength: 200
+    AdminInviteCreatedResponse:
+      type: object
+      required:
+        - email
+        - expires_at
+        - message
+      properties:
+        email:
+          type: string
+          format: email
+        expires_at:
+          type: string
+          format: date-time
+        message:
+          type: string
+          example: Invitation sent when email delivery succeeds.
     PatchMeRequest:
       type: object
       description: At least one property must be present

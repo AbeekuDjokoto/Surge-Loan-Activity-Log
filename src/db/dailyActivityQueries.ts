@@ -180,6 +180,31 @@ async function selectDailyActivityStats(
   };
 }
 
+/** Returns one list-row shape or null when the id does not exist. */
+export async function selectDailyActivityById(
+  activityId: string
+): Promise<DailyActivityListItemPublic | null> {
+  const { rows } = await pool.query<DailyActivityRowDb>(
+    `
+    SELECT
+      da.id,
+      da.agent_user_id,
+      da.agent_full_name,
+      da.location,
+      da.applications_count,
+      da.loan_amount::text AS loan_amount,
+      da.update_date::text AS update_date_text,
+      da.created_at
+    FROM daily_activity da
+    WHERE da.id = $1::uuid
+    `,
+    [activityId]
+  );
+  const row = rows[0];
+  if (!row) return null;
+  return dbRowToListItem(row);
+}
+
 export async function paginateDailyActivity(params: {
   filters: DailyActivityListFilters;
   page: number;

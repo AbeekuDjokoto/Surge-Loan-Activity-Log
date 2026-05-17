@@ -6,6 +6,7 @@ import {
   insertDailyActivity,
   paginateDailyActivity,
   selectAgentUserIdForDailyActivity,
+  selectDailyActivityById,
   updateDailyActivityPartial,
   type DailyActivityListFilters,
 } from "../db/dailyActivityQueries";
@@ -293,6 +294,47 @@ activityRouter.get(
         }),
         summary: result.summary,
       });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+activityRouter.get(
+  "/daily/:daily_activity_id",
+  authenticate,
+  async (req, res, next) => {
+    try {
+      const uuidSchema = z.string().uuid();
+      const idParsed = uuidSchema.safeParse(req.params.daily_activity_id ?? "");
+      if (!idParsed.success) {
+        throw new HttpError(422, "Invalid daily_activity_id: UUID expected");
+      }
+      const activityId = idParsed.data;
+
+      const auth = req.auth;
+      if (!auth) {
+        throw new HttpError(401, "Not authenticated");
+      }
+
+      const isAdmin = auth.roles.includes("admin");
+      const isAgentEligible =
+        auth.roles.includes("user") && !auth.roles.includes("admin");
+
+      if (!isAdmin && !isAgentEligible) {
+        throw new HttpError(403, "Insufficient permissions");
+      }
+
+      const row = await selectDailyActivityById(activityId);
+      if (row === null) {
+        throw new HttpError(404, "Daily activity not found");
+      }
+
+      if (!isAdmin && row.agent_uuid !== auth.userId) {
+        throw new HttpError(403, "You can only view your own daily activity");
+      }
+
+      res.status(200).json({ daily_activity: row });
     } catch (err) {
       next(err);
     }

@@ -370,4 +370,43 @@ describe.skipIf(!SHOULD_RUN_ACTIVITY)("Activity /activity integration", () => {
       expect(adminBlockedMe.status).toBe(403);
     });
   });
+
+  describe("GET /activity/daily/:daily_activity_id", () => {
+    it("agent reads own row; 403 other agent row; admin reads any", async () => {
+      const adminToken = await signupAdminOnlyToken();
+      const a = await signupAgent();
+      const b = await signupAgent();
+
+      const rowA = await request(app)
+        .post("/activity/daily")
+        .set("Authorization", `Bearer ${a.token}`)
+        .send(dailyBody(a, { update_date: "2026-11-01" }))
+        .expect(201);
+      const idA = rowA.body.daily_activity.id as string;
+
+      const rowB = await request(app)
+        .post("/activity/daily")
+        .set("Authorization", `Bearer ${b.token}`)
+        .send(dailyBody(b, { update_date: "2026-11-02" }))
+        .expect(201);
+      const idB = rowB.body.daily_activity.id as string;
+
+      const own = await request(app)
+        .get(`/activity/daily/${idA}`)
+        .set("Authorization", `Bearer ${a.token}`)
+        .expect(200);
+      expect(own.body.daily_activity.id).toBe(idA);
+      expect(own.body.daily_activity.agent_uuid).toBe(a.userId);
+
+      const forbidden = await request(app)
+        .get(`/activity/daily/${idB}`)
+        .set("Authorization", `Bearer ${a.token}`);
+      expect(forbidden.status).toBe(403);
+
+      await request(app)
+        .get(`/activity/daily/${idB}`)
+        .set("Authorization", `Bearer ${adminToken}`)
+        .expect(200);
+    });
+  });
 });

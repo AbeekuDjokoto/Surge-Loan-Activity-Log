@@ -13,6 +13,7 @@ import {
   storeRefresh,
 } from "../auth/refreshSession";
 import { env } from "../config/env";
+import { consumeAdminInvite } from "../db/adminInviteQueries";
 import {
   consumePasswordResetToken,
   createPasswordResetToken,
@@ -64,6 +65,14 @@ const resetPasswordLimiter = rateLimit({
   message: { error: "Too many reset attempts — try again later" },
 });
 
+const acceptAdminInviteLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 24,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many invite acceptance attempts — try again later" },
+});
+
 export const authRouter = Router();
 
 const registerSchema = z.object({
@@ -86,6 +95,43 @@ const resetPasswordSchema = z.object({
   token: z.string().min(1).max(512),
   password: z.string().min(12).max(200),
 });
+
+const acceptAdminInviteSchema = z
+  .object({
+    token: z.string().min(1).max(512),
+    password: z.string().min(12).max(200).optional(),
+    full_name: z.string().trim().min(1).max(200).optional(),
+    location_station: z.string().trim().min(1).max(200).optional(),
+  })
+  .strict()
+  .superRefine((b, ctx) => {
+    const hasReg =
+      b.password !== undefined ||
+      b.full_name !== undefined ||
+      b.location_station !== undefined;
+    if (!hasReg) return;
+    if (b.password === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "password is required when registering via invite",
+        path: ["password"],
+      });
+    }
+    if (b.full_name === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "full_name is required when registering via invite",
+        path: ["full_name"],
+      });
+    }
+    if (b.location_station === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "location_station is required when registering via invite",
+        path: ["location_station"],
+      });
+    }
+  });
 
 const patchMeSchema = z
   .object({
@@ -246,6 +292,52 @@ authRouter.post(
       next(err);
     }
   }
+);
+
+authRouter.post(
+  "/accept-admin-invite",
+  acceptAdminInviteLimiter,
+  async (req, res, next) => {
+    try {
+      const parsed = acceptAdminInviteSchema.safeParse(req.body ?? {});
+      if (!parsed.success) throw mapZodError(parsed.error);
+
+      const d = parsed.data;
+      const passwordHash =
+        d.password !== undefined ? await hashPassword(d.password) : undefined;
+
+      const result = await consumeAdminInvite({
+        rawToken: d.token,
+        passwordHash,
+        full_name: d.full_name,
+        location_station: d.location_station,
+      });
+
+      if (!result.ok) {
+        if (result.reason === "invalid_or_expired") {
+          throw new HttpError(400, "Invalid or expired invite token");
+        }
+        if (result.reason === "already_admin") {
+          throw new HttpError(409, "User is already an administrator");
+        }
+        if (result.reason === "email_already_registered") {
+          throw new HttpError(409, "Email is already registered");
+        }
+        throw new HttpError(
+          422,
+          "Provide password, full_name, and location_station to create your administrator account",
+        );
+      }
+
+      await revokeAllRefreshTokensForUser(result.userId);
+      const row = await selectUserPublicById(result.userId);
+      if (!row) throw new HttpError(500, "User record missing");
+
+      await sendSession(row, res, 201);
+    } catch (err) {
+      next(err);
+    }
+  },
 );
 
 authRouter.post("/refresh", async (req, res, next) => {

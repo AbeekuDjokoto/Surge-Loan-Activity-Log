@@ -47,6 +47,12 @@ const serverEnvSchema = databaseSchema.extend({
     .url()
     .default("http://localhost:5173/reset-password"),
   PASSWORD_RESET_TOKEN_TTL_HOURS: z.coerce.number().int().positive().max(168).default(1),
+  /** Admin invite link (SPA) without query string; `?token=` is appended. */
+  ADMIN_INVITE_URL_BASE: z
+    .string()
+    .url()
+    .default("http://localhost:5173/accept-admin-invite"),
+  ADMIN_INVITE_TOKEN_TTL_HOURS: z.coerce.number().int().positive().max(168).default(72),
   SMTP_HOST: z.string().min(1).optional(),
   SMTP_PORT: z.coerce.number().int().positive().max(65535).optional(),
   SMTP_USER: z.string().optional(),
