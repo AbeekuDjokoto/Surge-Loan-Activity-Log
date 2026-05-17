@@ -63,10 +63,23 @@ export const requireAgent: RequestHandler = (req, _res: Response, next: NextFunc
     return;
   }
   if (req.auth.roles.includes("admin")) {
-    next(new HttpError(403, "Admins cannot submit agent activity"));
+    next(new HttpError(403, "Administrator accounts cannot use this agent-only endpoint"));
     return;
   }
   if (!req.auth.roles.includes("user")) {
+    next(new HttpError(403, "Insufficient permissions"));
+    return;
+  }
+  next();
+};
+
+/** After `authenticate`: caller must include the `admin` role. */
+export const requireAdmin: RequestHandler = (req, _res: Response, next: NextFunction) => {
+  if (!req.auth) {
+    next(new HttpError(401, "Not authenticated"));
+    return;
+  }
+  if (!req.auth.roles.includes("admin")) {
     next(new HttpError(403, "Insufficient permissions"));
     return;
   }

@@ -22,6 +22,40 @@ export type DailyActivityRowDb = {
   created_at: Date;
 };
 
+export type DailyActivityListFilters = {
+  agentUserId?: string | undefined;
+  dateFrom?: string | undefined;
+  dateTo?: string | undefined;
+  loanMin?: number | undefined;
+  loanMax?: number | undefined;
+  locationSubstring?: string | undefined;
+  nameSubstring?: string | undefined;
+};
+
+export type DailyActivityListItemPublic = {
+  id: string;
+  agent_uuid: string;
+  agent_full_name: string;
+  location: string;
+  applications: number;
+  total_amount: number;
+  submitted: string;
+  date: string;
+};
+
+export type DailyActivityListSummary = {
+  total_updates: number;
+  total_loan_amount: number;
+  total_applications: number;
+  last_update: string | null;
+};
+
+export type PaginatedDailyActivityResult = {
+  items: DailyActivityListItemPublic[];
+  total_items: number;
+  summary: DailyActivityListSummary;
+};
+
 /** Thrown when the same agent already has activity for update_date */
 export class DuplicateDailyActivityConflict extends Error {
   constructor() {
@@ -52,6 +86,146 @@ function rowToDailyActivityPublic(row: DailyActivityRowDb): {
   };
 }
 
+export function dbRowToListItem(row: DailyActivityRowDb): DailyActivityListItemPublic {
+  return {
+    id: row.id,
+    agent_uuid: row.agent_user_id,
+    agent_full_name: row.agent_full_name,
+    location: row.location,
+    applications: row.applications_count,
+    total_amount: Number(row.loan_amount),
+    submitted: row.created_at.toISOString(),
+    date: row.update_date_text,
+  };
+}
+
+function buildDailyActivityWhereClause(filters: DailyActivityListFilters): {
+  whereSql: string;
+  values: unknown[];
+} {
+  const fragments: string[] = [];
+  const values: unknown[] = [];
+  let i = 1;
+
+  if (filters.agentUserId !== undefined) {
+    fragments.push(`da.agent_user_id = $${i++}::uuid`);
+    values.push(filters.agentUserId);
+  }
+  if (filters.dateFrom !== undefined) {
+    fragments.push(`da.update_date >= $${i++}::date`);
+    values.push(filters.dateFrom);
+  }
+  if (filters.dateTo !== undefined) {
+    fragments.push(`da.update_date <= $${i++}::date`);
+    values.push(filters.dateTo);
+  }
+  if (filters.loanMin !== undefined) {
+    fragments.push(`da.loan_amount >= $${i++}`);
+    values.push(filters.loanMin);
+  }
+  if (filters.loanMax !== undefined) {
+    fragments.push(`da.loan_amount <= $${i++}`);
+    values.push(filters.loanMax);
+  }
+  if (filters.locationSubstring !== undefined) {
+    fragments.push(`strpos(lower(da.location), lower($${i++}::text)) > 0`);
+    values.push(filters.locationSubstring.trim());
+  }
+  if (filters.nameSubstring !== undefined) {
+    fragments.push(
+      `strpos(lower(da.agent_full_name), lower($${i++}::text)) > 0`,
+    );
+    values.push(filters.nameSubstring.trim());
+  }
+
+  const whereSql = fragments.length === 0 ? "TRUE" : fragments.join(" AND ");
+  return { whereSql, values };
+}
+
+async function selectDailyActivityStats(
+  filters: DailyActivityListFilters
+): Promise<DailyActivityListSummary> {
+  const { whereSql, values } = buildDailyActivityWhereClause(filters);
+  const { rows } = await pool.query<{
+    total_updates: string;
+    total_loan_amount: string;
+    total_applications: string;
+    last_update: Date | null;
+  }>(
+    `
+    SELECT
+      COUNT(*)::text AS total_updates,
+      COALESCE(SUM(da.loan_amount), 0)::text AS total_loan_amount,
+      COALESCE(SUM(da.applications_count), 0)::text AS total_applications,
+      MAX(da.created_at) AS last_update
+    FROM daily_activity da
+    WHERE ${whereSql}
+    `,
+    values,
+  );
+  const r = rows[0];
+  if (!r) {
+    return {
+      total_updates: 0,
+      total_loan_amount: 0,
+      total_applications: 0,
+      last_update: null,
+    };
+  }
+  return {
+    total_updates: Number(r.total_updates),
+    total_loan_amount: Number(r.total_loan_amount),
+    total_applications: Number(r.total_applications),
+    last_update: r.last_update?.toISOString() ?? null,
+  };
+}
+
+export async function paginateDailyActivity(params: {
+  filters: DailyActivityListFilters;
+  page: number;
+  pageSize: number;
+}): Promise<PaginatedDailyActivityResult> {
+  const { filters, page, pageSize } = params;
+
+  const summary = await selectDailyActivityStats(filters);
+  const totalItems = summary.total_updates;
+
+  const { whereSql, values } = buildDailyActivityWhereClause(filters);
+  const limit = pageSize;
+  const offset = (page - 1) * pageSize;
+
+  const dataValues = [...values, limit, offset];
+  const limitIdx = values.length + 1;
+  const offsetIdx = values.length + 2;
+
+  const { rows } = await pool.query<DailyActivityRowDb>(
+    `
+    SELECT
+      da.id,
+      da.agent_user_id,
+      da.agent_full_name,
+      da.location,
+      da.applications_count,
+      da.loan_amount::text AS loan_amount,
+      da.update_date::text AS update_date_text,
+      da.created_at
+    FROM daily_activity da
+    WHERE ${whereSql}
+    ORDER BY da.update_date DESC, da.created_at DESC
+    LIMIT $${limitIdx}::integer OFFSET $${offsetIdx}::integer
+    `,
+    dataValues,
+  );
+
+  const items = rows.map(dbRowToListItem);
+
+  return {
+    items,
+    total_items: totalItems,
+    summary,
+  };
+}
+
 export async function insertDailyActivity(
   params: InsertDailyActivityInput
 ): Promise<ReturnType<typeof rowToDailyActivityPublic>> {
@@ -68,7 +242,7 @@ export async function insertDailyActivity(
       )
       VALUES ($1::uuid, $2, $3, $4, $5, $6::date)
       RETURNING id, agent_user_id, agent_full_name, location, applications_count,
-                loan_amount, update_date::text AS update_date_text, created_at
+                loan_amount::text AS loan_amount, update_date::text AS update_date_text, created_at
       `,
       [
         params.agentUserId,

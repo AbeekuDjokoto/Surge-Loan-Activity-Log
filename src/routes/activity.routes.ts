@@ -4,9 +4,11 @@ import { ZodError, z } from "zod";
 import {
   DuplicateDailyActivityConflict,
   insertDailyActivity,
+  paginateDailyActivity,
+  type DailyActivityListFilters,
 } from "../db/dailyActivityQueries";
+import { authenticate, requireAdmin, requireAgent } from "../http/authMiddleware";
 import { HttpError } from "../http/httpError";
-import { authenticate, requireAgent } from "../http/authMiddleware";
 
 export const activityRouter = Router();
 
@@ -22,6 +24,11 @@ function isCalendarDateLogical(s: string): boolean {
   );
 }
 
+const isoDateSchema = z
+  .string()
+  .regex(isoDateRegex, "must be YYYY-MM-DD")
+  .refine(isCalendarDateLogical, { message: "not a valid calendar date" });
+
 const dailyActivityBodySchema = z
   .object({
     agent_uuid: z.string().uuid(),
@@ -29,15 +36,92 @@ const dailyActivityBodySchema = z
     location: z.string().trim().min(1).max(200),
     applications_count: z.coerce.number().int().nonnegative(),
     loan_amount: z.coerce.number().finite().nonnegative(),
-    update_date: z
-      .string()
-      .trim()
-      .regex(isoDateRegex, "update_date must be YYYY-MM-DD")
-      .refine(isCalendarDateLogical, {
-        message: "update_date is not a valid calendar date",
-      }),
+    update_date: isoDateSchema,
   })
   .strict();
+
+const sharedListQueryShape = z.object({
+  page: z.coerce.number().int().positive().optional().default(1),
+  page_size: z.coerce.number().int().positive().max(100).optional().default(20),
+  date_from: isoDateSchema.optional(),
+  date_to: isoDateSchema.optional(),
+  loan_min: z.coerce.number().finite().nonnegative().optional(),
+  loan_max: z.coerce.number().finite().nonnegative().optional(),
+  location: z.string().trim().min(1).max(200).optional(),
+  name: z.string().trim().min(1).max(200).optional(),
+});
+
+const agentDailyListQuerySchema = sharedListQueryShape
+  .strict()
+  .superRefine((q, ctx) => {
+    if (
+      q.date_from !== undefined &&
+      q.date_to !== undefined &&
+      q.date_from > q.date_to
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "date_to must be on or after date_from",
+        path: ["date_to"],
+      });
+    }
+    if (
+      q.loan_min !== undefined &&
+      q.loan_max !== undefined &&
+      q.loan_min > q.loan_max
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "loan_max must be greater than or equal to loan_min",
+        path: ["loan_max"],
+      });
+    }
+  });
+
+const adminDailyListQuerySchema = sharedListQueryShape
+  .extend({
+    agent_uuid: z.string().uuid().optional(),
+  })
+  .strict()
+  .superRefine((q, ctx) => {
+    if (
+      q.date_from !== undefined &&
+      q.date_to !== undefined &&
+      q.date_from > q.date_to
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "date_to must be on or after date_from",
+        path: ["date_to"],
+      });
+    }
+    if (
+      q.loan_min !== undefined &&
+      q.loan_max !== undefined &&
+      q.loan_min > q.loan_max
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "loan_max must be greater than or equal to loan_min",
+        path: ["loan_max"],
+      });
+    }
+  });
+
+function filtersFromParsed(
+  parsed:
+    | z.infer<typeof agentDailyListQuerySchema>
+    | z.infer<typeof adminDailyListQuerySchema>
+): Omit<DailyActivityListFilters, "agentUserId"> {
+  return {
+    dateFrom: parsed.date_from,
+    dateTo: parsed.date_to,
+    loanMin: parsed.loan_min,
+    loanMax: parsed.loan_max,
+    locationSubstring: parsed.location,
+    nameSubstring: parsed.name,
+  };
+}
 
 function mapZodError(err: ZodError): HttpError {
   const first = err.issues[0];
@@ -45,6 +129,20 @@ function mapZodError(err: ZodError): HttpError {
   const loc =
     Array.isArray(first.path) && first.path.length > 0 ? first.path.join(".") : "payload";
   return new HttpError(422, `Invalid ${loc}: ${first.message}`);
+}
+
+function paginationMeta(params: {
+  page: number;
+  page_size: number;
+  total_items: number;
+}) {
+  const total_pages = Math.max(1, Math.ceil(params.total_items / params.page_size) || 1);
+  return {
+    page: params.page,
+    page_size: params.page_size,
+    total_items: params.total_items,
+    total_pages,
+  };
 }
 
 activityRouter.post(
@@ -77,6 +175,82 @@ activityRouter.post(
       });
 
       res.status(201).json({ daily_activity });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+activityRouter.get(
+  "/daily/me",
+  authenticate,
+  requireAgent,
+  async (req, res, next) => {
+    try {
+      const parsed = agentDailyListQuerySchema.safeParse(req.query ?? {});
+      if (!parsed.success) throw mapZodError(parsed.error);
+
+      const userId = req.auth?.userId;
+      if (!userId) {
+        throw new HttpError(401, "Not authenticated");
+      }
+
+      const filters: DailyActivityListFilters = {
+        ...filtersFromParsed(parsed.data),
+        agentUserId: userId,
+      };
+
+      const result = await paginateDailyActivity({
+        filters,
+        page: parsed.data.page,
+        pageSize: parsed.data.page_size,
+      });
+
+      res.status(200).json({
+        items: result.items,
+        pagination: paginationMeta({
+          page: parsed.data.page,
+          page_size: parsed.data.page_size,
+          total_items: result.total_items,
+        }),
+        summary: result.summary,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+activityRouter.get(
+  "/daily",
+  authenticate,
+  requireAdmin,
+  async (req, res, next) => {
+    try {
+      const parsed = adminDailyListQuerySchema.safeParse(req.query ?? {});
+      if (!parsed.success) throw mapZodError(parsed.error);
+
+      const filters: DailyActivityListFilters = {
+        ...filtersFromParsed(parsed.data),
+        agentUserId:
+          parsed.data.agent_uuid !== undefined ? parsed.data.agent_uuid : undefined,
+      };
+
+      const result = await paginateDailyActivity({
+        filters,
+        page: parsed.data.page,
+        pageSize: parsed.data.page_size,
+      });
+
+      res.status(200).json({
+        items: result.items,
+        pagination: paginationMeta({
+          page: parsed.data.page,
+          page_size: parsed.data.page_size,
+          total_items: result.total_items,
+        }),
+        summary: result.summary,
+      });
     } catch (err) {
       next(err);
     }

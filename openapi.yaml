@@ -1,11 +1,13 @@
 openapi: 3.0.3
 info:
   title: Surge Loan Activity Log API
-  version: 0.4.0
+  version: 0.5.0
   description: |
     HTTP API backing agent activity logs and admin summaries.
 
-    Agents (JWT `user` role, not `admin`) submit daily rows via `POST /activity/daily`. One row per agent per reporting `update_date` (duplicate returns 409). Idempotent dev admin provisioning: run `npm run db:seed` after migrations (see `SEED_ADMIN_*` in `.env.example`).
+    Agents (JWT `user` role, not `admin`) submit daily rows via `POST /activity/daily`. They list only their rows with filters and summaries via **`GET /activity/daily/me`**. Admins (`admin` JWT) list all agents (**`GET /activity/daily`**, optional **`agent_uuid`**) with the same filters, pagination, and aggregate **`summary`** (totals scoped to matching filters).
+
+    Idempotent dev admin provisioning: run `npm run db:seed` after migrations (see `SEED_ADMIN_*` in `.env.example`).
 
     User onboarding exposes `/auth/register` with Argon2id-backed passwords and a short-lived JWT access token in JSON.
     The rotating refresh token is issued only as an HttpOnly `surge_refresh` cookie (Path `/auth`), not in response bodies, so browser JS cannot read it alongside the access token.
@@ -359,6 +361,49 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /activity/daily/me:
+    get:
+      tags: [Activities]
+      summary: List my daily activity updates — agent only
+      description: |
+        Bearer JWT — requires `user` and must not include `admin`. Rows are scoped to the authenticated user.
+        `summary` aggregates over **all matching rows** (after filters), not only the current page.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ActivityListPage"
+        - $ref: "#/components/parameters/ActivityPageSize"
+        - $ref: "#/components/parameters/ActivityDateFrom"
+        - $ref: "#/components/parameters/ActivityDateTo"
+        - $ref: "#/components/parameters/ActivityLoanMin"
+        - $ref: "#/components/parameters/ActivityLoanMax"
+        - $ref: "#/components/parameters/ActivityLocationFilter"
+        - $ref: "#/components/parameters/ActivityNameFilter"
+      responses:
+        "200":
+          description: Paginated list with summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DailyActivityListResponse"
+        "401":
+          description: Missing malformed or expired access JWT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Caller must be an agent (not administrator)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /activity/daily:
     post:
       tags: [Activities]
@@ -405,6 +450,49 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+    get:
+      tags: [Activities]
+      summary: List daily activity updates for all agents — admin only
+      description: |
+        Bearer JWT — requires `admin`. Optional **`agent_uuid`** narrows rows to one agent.
+        **`summary`** reflects all rows matching filters (excluding pagination).
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ActivityListPage"
+        - $ref: "#/components/parameters/ActivityPageSize"
+        - $ref: "#/components/parameters/ActivityDateFrom"
+        - $ref: "#/components/parameters/ActivityDateTo"
+        - $ref: "#/components/parameters/ActivityLoanMin"
+        - $ref: "#/components/parameters/ActivityLoanMax"
+        - $ref: "#/components/parameters/ActivityLocationFilter"
+        - $ref: "#/components/parameters/ActivityNameFilter"
+        - $ref: "#/components/parameters/ActivityAgentUuidFilter"
+      responses:
+        "200":
+          description: Paginated list with summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DailyActivityListResponse"
+        "401":
+          description: Missing malformed or expired access JWT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Caller is not an admin
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 tags:
   - name: Documentation
     description: Public API description files (Swagger / codegen).
@@ -413,7 +501,7 @@ tags:
   - name: Auth
     description: Registration, login, JWT access, HttpOnly refresh rotation, logout, password reset email, and profile read/update
   - name: Activities
-    description: Agent daily activity ingestion
+    description: Agent daily activity (submit; agents GET `/daily/me`; admins GET `/daily`)
 components:
   securitySchemes:
     bearerAuth:
@@ -423,6 +511,88 @@ components:
       description:
         Access JWT goes in Authorization Bearer. Obtain it via /auth/register, /auth/login,
         or /auth/refresh. Long-lived rotation uses the HttpOnly surge_refresh cookie (never returned in JSON).
+  parameters:
+    ActivityListPage:
+      name: page
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+      description: 1-based page index
+    ActivityPageSize:
+      name: page_size
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+      description: Rows per page (max 100)
+    ActivityDateFrom:
+      name: date_from
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date
+        pattern: '^\\d{4}-\\d{2}-\\d{2}$'
+      description: Inclusive lower bound on reporting `update_date`
+    ActivityDateTo:
+      name: date_to
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date
+        pattern: '^\\d{4}-\\d{2}-\\d{2}$'
+      description: Inclusive upper bound on reporting `update_date` (must be on or after `date_from` when both sent)
+    ActivityLoanMin:
+      name: loan_min
+      in: query
+      required: false
+      schema:
+        type: number
+        format: double
+        minimum: 0
+      description: Inclusive minimum `loan_amount` (total_amount) filter
+    ActivityLoanMax:
+      name: loan_max
+      in: query
+      required: false
+      schema:
+        type: number
+        format: double
+        minimum: 0
+      description: Inclusive maximum loan filter (must be >= `loan_min` when both sent)
+    ActivityLocationFilter:
+      name: location
+      in: query
+      required: false
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 200
+      description: Case-insensitive substring match on stored location
+    ActivityNameFilter:
+      name: name
+      in: query
+      required: false
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 200
+      description: Case-insensitive substring match on agent full name snapshot
+    ActivityAgentUuidFilter:
+      name: agent_uuid
+      in: query
+      required: false
+      schema:
+        type: string
+        format: uuid
+      description: Admin-only — restrict results to one agent (`agent_user_id`)
   schemas:
     ErrorResponse:
       type: object
@@ -647,3 +817,106 @@ components:
       properties:
         daily_activity:
           $ref: "#/components/schemas/DailyActivityPublic"
+    DailyActivityListRow:
+      type: object
+      description: Snapshot row for dashboards (distinct field names from create response)
+      required:
+        - id
+        - agent_uuid
+        - agent_full_name
+        - location
+        - applications
+        - total_amount
+        - submitted
+        - date
+      properties:
+        id:
+          type: string
+          format: uuid
+        agent_uuid:
+          type: string
+          format: uuid
+        agent_full_name:
+          type: string
+        location:
+          type: string
+        applications:
+          type: integer
+          minimum: 0
+          description: Stored `applications_count` at submission time
+        total_amount:
+          type: number
+          format: double
+          minimum: 0
+          description: Stored `loan_amount` at submission time
+        submitted:
+          type: string
+          format: date-time
+          description: Submission timestamp (`created_at`)
+        date:
+          type: string
+          format: date
+          description: Reporting `update_date` (YYYY-MM-DD)
+    DailyActivityPagination:
+      type: object
+      required:
+        - page
+        - page_size
+        - total_items
+        - total_pages
+      properties:
+        page:
+          type: integer
+          minimum: 1
+        page_size:
+          type: integer
+          minimum: 1
+          maximum: 100
+        total_items:
+          type: integer
+          minimum: 0
+          description: Count of matching rows across all pages for current filters
+        total_pages:
+          type: integer
+          minimum: 1
+          description: Derived from total_items — at least one page returned even when empty
+    DailyActivitySummary:
+      type: object
+      required:
+        - total_updates
+        - total_loan_amount
+        - total_applications
+      properties:
+        total_updates:
+          type: integer
+          minimum: 0
+          description: Count of matching rows (same denominator as pagination total_items)
+        total_loan_amount:
+          type: number
+          format: double
+          minimum: 0
+          description: Sum of matching `loan_amount` values
+        total_applications:
+          type: integer
+          minimum: 0
+          description: Sum of matching `applications_count` values
+        last_update:
+          type: string
+          format: date-time
+          nullable: true
+          description: Latest `created_at` among matching rows (`null` when no matches)
+    DailyActivityListResponse:
+      type: object
+      required:
+        - items
+        - pagination
+        - summary
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/DailyActivityListRow"
+        pagination:
+          $ref: "#/components/schemas/DailyActivityPagination"
+        summary:
+          $ref: "#/components/schemas/DailyActivitySummary"
