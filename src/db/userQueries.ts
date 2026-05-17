@@ -39,6 +39,17 @@ export async function selectUserCredentialByEmail(
   return rows[0] ?? null;
 }
 
+export async function selectUserIdByEmail(
+  runner: Runner,
+  email: string
+): Promise<string | null> {
+  const { rows } = await runner.query<{ id: string }>(
+    `SELECT id FROM users WHERE email = $1`,
+    [email.trim().toLowerCase()]
+  );
+  return rows[0]?.id ?? null;
+}
+
 /** Full profile with role codes sorted for stable JWT payloads. */
 export async function selectUserPublicById(
   userId: string
@@ -64,6 +75,86 @@ export async function selectUserPublicById(
     ...row,
     roles,
   };
+}
+
+export type UpdateUserProfilePatch = {
+  full_name?: string;
+  location_station?: string;
+  email?: string;
+};
+
+/** Partial update; at least one field should be set (caller validates). */
+export async function updateUserProfileById(params: {
+  userId: string;
+  patch: UpdateUserProfilePatch;
+}): Promise<UserPublicRow | null> {
+  const { patch } = params;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const cur = await client.query<{
+      email: string;
+    }>(
+      `SELECT email::text AS email FROM users WHERE id = $1::uuid`,
+      [params.userId]
+    );
+    const current = cur.rows[0];
+    if (!current) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+
+    const normalizedEmail =
+      patch.email !== undefined
+        ? patch.email.trim().toLowerCase()
+        : undefined;
+    const emailChanged =
+      normalizedEmail !== undefined &&
+      normalizedEmail !== current.email.toLowerCase();
+
+    const fragments: string[] = [];
+    const values: unknown[] = [];
+    let i = 1;
+
+    if (patch.full_name !== undefined) {
+      fragments.push(`full_name = $${i++}`);
+      values.push(patch.full_name.trim());
+    }
+    if (patch.location_station !== undefined) {
+      fragments.push(`location_station = $${i++}`);
+      values.push(patch.location_station.trim());
+    }
+    if (normalizedEmail !== undefined) {
+      fragments.push(`email = $${i++}::citext`);
+      values.push(normalizedEmail);
+      if (emailChanged) {
+        fragments.push(`email_verified_at = NULL`);
+      }
+    }
+
+    if (fragments.length === 0) {
+      await client.query("ROLLBACK");
+      return selectUserPublicById(params.userId);
+    }
+
+    values.push(params.userId);
+    await client.query(
+      `UPDATE users SET ${fragments.join(", ")} WHERE id = $${i}::uuid`,
+      values
+    );
+    await client.query("COMMIT");
+    return selectUserPublicById(params.userId);
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+
+    if (err instanceof DatabaseError) {
+      if (err.code === "23505") throw new DuplicateEmailConflict();
+    }
+
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 /** Insert user plus default role `user` in one transaction (caller supplies password hash). */

@@ -11,6 +11,8 @@ This repository **is** the API service (Node.js + Express + PostgreSQL + Redis).
 - **`npm test`**: Vitest specs under [`tests/`](tests/); defaults in [`tests/setup/env.ts`](tests/setup/env.ts) seed `DATABASE_URL` and `REDIS_URL` before any `src/` import.
 - **Infra**: Run **Postgres** and **Redis** on the host (or your provider). No Docker in this repo — see [`.env.example`](.env.example).
 - **Docs**: Interactive Swagger UI at **`/api-docs`**; source spec [`openapi.yaml`](openapi.yaml). **`GET /openapi.json`** / **`GET /openapi.yaml`** republish it for Postman/codegen/etc. with permissive browser CORS. Restart the process after editing `openapi.yaml` so caches refresh.
+- **Password reset**: `POST /auth/forgot-password` and `POST /auth/reset-password`; configure `EMAIL_MODE`, `PASSWORD_RESET_URL_BASE`, and SMTP vars (see [`.env.example`](.env.example)). Migration [`migrations/003_password_reset_tokens.sql`](migrations/003_password_reset_tokens.sql).
+- **Profile**: `PATCH /auth/me` (Bearer JWT) updates `full_name`, `location_station`, and/or `email`.
 
 ### Layout
 

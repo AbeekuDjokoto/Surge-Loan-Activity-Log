@@ -22,3 +22,7 @@ process.env.ACCESS_TOKEN_EXPIRES_IN =
   process.env.ACCESS_TOKEN_EXPIRES_IN ?? "15m";
 process.env.REFRESH_TOKEN_EXPIRES_IN =
   process.env.REFRESH_TOKEN_EXPIRES_IN ?? "7d";
+process.env.EMAIL_MODE = process.env.EMAIL_MODE ?? "console";
+process.env.PASSWORD_RESET_URL_BASE =
+  process.env.PASSWORD_RESET_URL_BASE ??
+  "http://localhost:5173/reset-password";

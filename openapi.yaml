@@ -1,13 +1,15 @@
 openapi: 3.0.3
 info:
   title: Surge Loan Activity Log API
-  version: 0.2.1
+  version: 0.3.0
   description: |
     HTTP API backing agent activity logs and admin summaries.
 
     User onboarding exposes `/auth/register` with Argon2id-backed passwords and a short-lived JWT access token in JSON.
     The rotating refresh token is issued only as an HttpOnly `surge_refresh` cookie (Path `/auth`), not in response bodies, so browser JS cannot read it alongside the access token.
     Opaque refresh entries live in Redis. Roles (`user`, `admin`) attach at signup; elevate admins via DB or a future admin API.
+
+    Password reset issues a single-use token (hashed in Postgres); configure SMTP (`EMAIL_MODE=smtp`) or use `EMAIL_MODE=console` locally to log reset links. The SPA URL base is `PASSWORD_RESET_URL_BASE` (query `token=` is appended). Successful reset revokes all refresh sessions for that user in Redis.
 
     Sharing these docs publicly
 
@@ -172,6 +174,72 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /auth/forgot-password:
+    post:
+      tags: [Auth]
+      summary: Request password reset email
+      description: |
+        Always returns `202` with the same message whether the email is registered (prevents account enumeration).
+        Rate limited more tightly than login. If the account exists, a single-use token is emailed (or logged when `EMAIL_MODE=console`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ForgotPasswordRequest"
+      responses:
+        "202":
+          description: Request accepted — check email if an account exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForgotPasswordResponse"
+        "422":
+          description: Payload validation failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many reset requests (rate limited)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /auth/reset-password:
+    post:
+      tags: [Auth]
+      summary: Set a new password using email token
+      description: |
+        Body carries the raw `token` from the reset link (`?token=`). On success, password is updated, the token is consumed,
+        other pending reset tokens for the user are cleared, and all Redis refresh slots for the user are revoked.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResetPasswordRequest"
+      responses:
+        "204":
+          description: Password updated; token invalidated
+        "400":
+          description: Invalid or expired reset token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Payload validation failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many reset attempts (rate limited)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /auth/refresh:
     post:
       tags: [Auth]
@@ -240,13 +308,62 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+    patch:
+      tags: [Auth]
+      summary: Update current user profile
+      description: |
+        At least one of `full_name`, `location_station`, or `email` must be provided. Changing `email` clears `email_verified_at` until a future verification flow exists.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchMeRequest"
+      responses:
+        "200":
+          description: Updated public profile
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - user
+                properties:
+                  user:
+                    $ref: "#/components/schemas/UserPublic"
+        "401":
+          description: Missing, malformed, or expired access JWT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: JWT valid but backing user row disappeared
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Updated email already in use
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Payload validation failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 tags:
   - name: Documentation
     description: Public API description files (Swagger / codegen).
   - name: System
     description: Operational endpoints
   - name: Auth
-    description: Registration login JWT access plus HttpOnly refresh cookie rotation and logout
+    description: Registration, login, JWT access, HttpOnly refresh rotation, logout, password reset email, and profile read/update
 components:
   securitySchemes:
     bearerAuth:
@@ -300,6 +417,55 @@ components:
           format: email
         password:
           type: string
+    ForgotPasswordRequest:
+      type: object
+      required:
+        - email
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 320
+    ForgotPasswordResponse:
+      type: object
+      required:
+        - message
+      properties:
+        message:
+          type: string
+          example: If an account exists for that email, you will receive password reset instructions.
+    ResetPasswordRequest:
+      type: object
+      required:
+        - token
+        - password
+      properties:
+        token:
+          type: string
+          description: Raw token from the reset link query string
+          maxLength: 512
+        password:
+          type: string
+          format: password
+          minLength: 12
+          maxLength: 200
+    PatchMeRequest:
+      type: object
+      description: At least one property must be present
+      properties:
+        full_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        location_station:
+          type: string
+          minLength: 1
+          maxLength: 200
+        email:
+          type: string
+          format: email
+          maxLength: 320
+      minProperties: 1
     AccessTokensResponse:
       type: object
       description: Access JWT payload only refresh token is never included (HttpOnly cookie instead)

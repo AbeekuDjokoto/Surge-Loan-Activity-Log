@@ -44,3 +44,20 @@ export async function rotateRefresh(
   const newRefresh = await storeRefresh(userId);
   return { userId, newRefresh };
 }
+
+/** Invalidate every active refresh slot bound to this user (e.g. after password change). */
+export async function revokeAllRefreshTokensForUser(
+  userId: string
+): Promise<number> {
+  const redis = getRedis();
+  let deleted = 0;
+  const pattern = `${PREFIX}:*`;
+  for await (const key of redis.scanIterator({ MATCH: pattern, COUNT: 128 })) {
+    const val = await redis.get(key);
+    if (val === userId) {
+      await redis.del(key);
+      deleted += 1;
+    }
+  }
+  return deleted;
+}

@@ -6,18 +6,31 @@ import { durationToSeconds } from "../auth/duration";
 import { attachRefreshCookie, readRefreshTokenFromCookies, revokeRefreshCookie } from "../auth/refreshCookie";
 import { hashPassword, verifyPassword } from "../auth/password";
 import { signAccessToken } from "../auth/accessToken";
-import { revokeRefresh, rotateRefresh, storeRefresh } from "../auth/refreshSession";
+import {
+  revokeAllRefreshTokensForUser,
+  revokeRefresh,
+  rotateRefresh,
+  storeRefresh,
+} from "../auth/refreshSession";
 import { env } from "../config/env";
+import {
+  consumePasswordResetToken,
+  createPasswordResetToken,
+} from "../db/passwordResetQueries";
+import { pool } from "../db/pool";
 import {
   DuplicateEmailConflict,
   insertUserAndAssignRole,
   selectUserCredentialByEmail,
+  selectUserIdByEmail,
   selectUserPublicById,
+  updateUserProfileById,
   type UserPublicRow,
 } from "../db/userQueries";
-import { pool } from "../db/pool";
+import { sendPasswordResetEmail } from "../email/sendPasswordReset";
 import { HttpError } from "../http/httpError";
 import { authenticate } from "../http/authMiddleware";
+import { logger } from "../logger";
 
 const registerLimiter = rateLimit({
   windowMs: 60_000,
@@ -35,6 +48,22 @@ const loginLimiter = rateLimit({
   message: { error: "Too many login attempts — try again later" },
 });
 
+const forgotPasswordLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 8,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many password reset requests — try again later" },
+});
+
+const resetPasswordLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 25,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many reset attempts — try again later" },
+});
+
 export const authRouter = Router();
 
 const registerSchema = z.object({
@@ -48,6 +77,30 @@ const credentialsSchema = z.object({
   email: z.string().trim().email().max(320),
   password: z.string().min(1).max(200),
 });
+
+const forgotPasswordSchema = z.object({
+  email: z.string().trim().email().max(320),
+});
+
+const resetPasswordSchema = z.object({
+  token: z.string().min(1).max(512),
+  password: z.string().min(12).max(200),
+});
+
+const patchMeSchema = z
+  .object({
+    full_name: z.string().trim().min(1).max(200).optional(),
+    location_station: z.string().trim().min(1).max(200).optional(),
+    email: z.string().trim().email().max(320).optional(),
+  })
+  .strict()
+  .refine(
+    (b) =>
+      b.full_name !== undefined ||
+      b.location_station !== undefined ||
+      b.email !== undefined,
+    { message: "At least one of full_name, location_station, email is required" }
+  );
 
 function publicUserPayload(row: UserPublicRow) {
   return {
@@ -139,6 +192,62 @@ authRouter.post("/login", loginLimiter, async (req, res, next) => {
   }
 });
 
+authRouter.post(
+  "/forgot-password",
+  forgotPasswordLimiter,
+  async (req, res, next) => {
+    try {
+      const parsed = forgotPasswordSchema.safeParse(req.body ?? {});
+      if (!parsed.success) throw mapZodError(parsed.error);
+
+      const email = parsed.data.email.trim().toLowerCase();
+      const userId = await selectUserIdByEmail(pool, email);
+      if (userId) {
+        const { rawToken } = await createPasswordResetToken({
+          userId,
+          ttlHours: env.PASSWORD_RESET_TOKEN_TTL_HOURS,
+        });
+        try {
+          await sendPasswordResetEmail({ to: email, rawToken });
+        } catch (err) {
+          logger.error({ err }, "password reset email failed");
+        }
+      }
+
+      res.status(202).json({
+        message:
+          "If an account exists for that email, you will receive password reset instructions.",
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+authRouter.post(
+  "/reset-password",
+  resetPasswordLimiter,
+  async (req, res, next) => {
+    try {
+      const parsed = resetPasswordSchema.safeParse(req.body ?? {});
+      if (!parsed.success) throw mapZodError(parsed.error);
+
+      const passwordHash = await hashPassword(parsed.data.password);
+      const result = await consumePasswordResetToken({
+        rawToken: parsed.data.token,
+        passwordHash,
+      });
+      if (!result.ok)
+        throw new HttpError(400, "Invalid or expired reset token");
+
+      await revokeAllRefreshTokensForUser(result.userId);
+      res.status(204).end();
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 authRouter.post("/refresh", async (req, res, next) => {
   try {
     const rt = readRefreshTokenFromCookies(req);
@@ -182,6 +291,30 @@ authRouter.get("/me", authenticate, async (req, res, next) => {
     if (!row) throw new HttpError(404, "User not found");
 
     res.status(200).json({ user: publicUserPayload(row) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+authRouter.patch("/me", authenticate, async (req, res, next) => {
+  try {
+    const parsed = patchMeSchema.safeParse(req.body ?? {});
+    if (!parsed.success) throw mapZodError(parsed.error);
+
+    const userId = req.auth!.userId;
+    try {
+      const row = await updateUserProfileById({
+        userId,
+        patch: parsed.data,
+      });
+      if (!row) throw new HttpError(404, "User not found");
+
+      res.status(200).json({ user: publicUserPayload(row) });
+    } catch (err: unknown) {
+      if (err instanceof DuplicateEmailConflict)
+        throw new HttpError(409, err.message);
+      throw err;
+    }
   } catch (err) {
     next(err);
   }
