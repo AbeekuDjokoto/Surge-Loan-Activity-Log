@@ -1,13 +1,13 @@
 openapi: 3.0.3
 info:
   title: Surge Loan Activity Log API
-  version: 0.7.0
+  version: 0.7.1
   description: |
     HTTP API backing agent activity logs and admin summaries.
 
     Agents (JWT `user` role, not `admin`) submit daily rows via `POST /activity/daily`, edit countable fields via **`PATCH /activity/daily/{daily_activity_id}`**, and list their rows via **`GET /activity/daily/me`**. Admins (`admin` JWT) list everyone via **`GET /activity/daily`** (optional **`agent_uuid`**) and may fetch or patch any activity row. Duplicate `(agent_user_id, update_date)` returns 409 on create or patch.
 
-    Idempotent dev admin provisioning: run `npm run db:seed` after migrations (see `SEED_ADMIN_*` in `.env.example`). Additional admins are invited via **`POST /admin/invites`** (JWT `admin`) and accept via **`POST /auth/accept-admin-invite`**. Invite links use `ADMIN_INVITE_URL_BASE` with `?token=` (similar to password reset).
+    Idempotent dev admin provisioning: run `npm run db:seed` after migrations (`npm run build` then migrate; compiled `dist` on hosts without `tsx` — see **`repo.md` / `.env.example` Render notes`). Configure `SEED_ADMIN_*` in `.env.example`. Additional admins are invited via **`POST /admin/invites`** (JWT `admin`) and accept via **`POST /auth/accept-admin-invite`**. Invite links use `ADMIN_INVITE_URL_BASE` with `?token=` (similar to password reset).
 
     **Authentication:** Administrators use the same **`POST /auth/login`**, **`POST /auth/forgot-password`**, and **`POST /auth/reset-password`** flows as agents; the JWT includes role codes from the user record.
 

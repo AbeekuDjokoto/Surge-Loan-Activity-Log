@@ -1,6 +1,6 @@
 /**
  * Idempotent admin user provisioning (PostgreSQL via DATABASE_URL).
- * Run after `npm run db:migrate`. Configure SEED_ADMIN_* vars (see `.env.example`).
+ * Run after **`npm run db:migrate`** (use **`npm run db:migrate:dev`** / **`db:seed:dev`** with **`tsx`** when iterating without **`npm run build`**).
  */
 import process from "node:process";
 import { z } from "zod";
