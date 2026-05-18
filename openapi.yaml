@@ -31,6 +31,8 @@ info:
 servers:
   - url: http://localhost:3000
     description: Local / development (replace after deployment)
+  - url: https://surge-loan-activity-log.onrender.com
+    description: Production
 paths:
   /openapi.yaml:
     get:
