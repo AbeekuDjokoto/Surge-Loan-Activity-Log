@@ -41,6 +41,11 @@ const serverEnvSchema = databaseSchema.extend({
   REFRESH_TOKEN_EXPIRES_IN: durationSuffixSchema.default("7d"),
   /** `console` logs reset links; `smtp` sends mail (requires SMTP_* and MAIL_FROM). */
   EMAIL_MODE: z.enum(["console", "smtp"]).default("console"),
+  /**
+   * When `EMAIL_MODE=console`, allow `reset_url` on `POST /auth/forgot-password` JSON (`true`|`false`).
+   * Omitted defaults: off in NODE_ENV production, on otherwise (protects against token theft on public APIs).
+   */
+  PASSWORD_RESET_RETURN_RESET_URL: z.enum(["true", "false"]).optional(),
   /** SPA reset page without query string; override in production. */
   PASSWORD_RESET_URL_BASE: z
     .string()
@@ -91,3 +96,12 @@ function loadServerEnv(): Env {
 }
 
 export const env = loadServerEnv();
+
+/** Include full reset deep link on forgot-password response (console mode only; see PASSWORD_RESET_RETURN_RESET_URL). */
+export function includeForgotPasswordResetUrlInBody(): boolean {
+  if (env.EMAIL_MODE !== "console") return false;
+  const o = env.PASSWORD_RESET_RETURN_RESET_URL;
+  if (o === "true") return true;
+  if (o === "false") return false;
+  return env.NODE_ENV !== "production";
+}

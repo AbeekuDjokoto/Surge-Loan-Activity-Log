@@ -22,6 +22,7 @@ vi.mock("../../src/email/sendPasswordReset", async (importOriginal) => {
 import { createApp } from "../../src/http/app";
 import { pool } from "../../src/db/pool";
 import { connectRedis, disconnectRedis } from "../../src/redis/client";
+import { buildPasswordResetUrl } from "../../src/email/sendPasswordReset";
 
 const app = createApp();
 const SHOULD_RUN = process.env.RUN_AUTH_INTEGRATION_TESTS === "1";
@@ -67,6 +68,7 @@ describe.skipIf(!SHOULD_RUN)("Auth password reset + PATCH /auth/me integration",
     const rawToken = sendPasswordResetEmailMock.mock.calls[0]?.[0]?.rawToken;
     expect(typeof rawToken).toBe("string");
     expect((rawToken as string).length).toBeGreaterThan(20);
+    expect(forgot.body.reset_url).toBe(buildPasswordResetUrl(rawToken as string));
 
     await request(app)
       .post("/auth/reset-password")
@@ -90,6 +92,7 @@ describe.skipIf(!SHOULD_RUN)("Auth password reset + PATCH /auth/me integration",
       .send({ email: `nope-${crypto.randomUUID()}@example.invalid` });
     expect(forgot.status).toBe(202);
     expect(sendPasswordResetEmailMock).not.toHaveBeenCalled();
+    expect(forgot.body.reset_url).toBeUndefined();
   });
 
   it("PATCH /auth/me updates profile; duplicate email 409", async () => {

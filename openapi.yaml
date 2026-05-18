@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Surge Loan Activity Log API
-  version: 0.7.1
+  version: 0.7.3
   description: |
     HTTP API backing agent activity logs and admin summaries.
 
@@ -15,7 +15,7 @@ info:
     The rotating refresh token is issued only as an HttpOnly `surge_refresh` cookie (Path `/auth`), not in response bodies, so browser JS cannot read it alongside the access token.
     Opaque refresh entries live in Redis. Roles (`user`, `admin`) attach at signup or when accepting an admin invite.
 
-    Password reset issues a single-use token (hashed in Postgres); configure SMTP (`EMAIL_MODE=smtp`) or use `EMAIL_MODE=console` locally to log reset links. The SPA URL base is `PASSWORD_RESET_URL_BASE` (query `token=` is appended). Successful reset revokes all refresh sessions for that user in Redis.
+    Password reset uses a single-use token (hashed in Postgres). **`EMAIL_MODE=smtp`** sends email; **`EMAIL_MODE=console`** logs links to stdout (fine in production alongside log aggregation). With console mode, **`POST /auth/forgot-password`** may include **`reset_url`** in JSON when enabled (default off under **`NODE_ENV=production`**; set **`PASSWORD_RESET_RETURN_RESET_URL=true`** to opt in — unsafe on a public forgot-password endpoint). Omit when using SMTP. SPA base is **`PASSWORD_RESET_URL_BASE`** (`token=` appended, URL-encoded). Successful reset revokes Redis refresh slots for that user.
 
     Sharing these docs publicly
 
@@ -189,8 +189,9 @@ paths:
       tags: [Auth]
       summary: Request password reset email
       description: |
-        Always returns `202` with the same message whether the email is registered (prevents account enumeration).
-        Rate limited more tightly than login. If the account exists, a single-use token is emailed (or logged when `EMAIL_MODE=console`).
+        Returns `202` with the same **message** for every request so callers cannot distinguish registered vs unknown email from wording alone.
+
+        Rate limited more tightly than login. If the account exists, a single-use token is emailed (`EMAIL_MODE=smtp`) or logged (`EMAIL_MODE=console`). Optional JSON **`reset_url`** (same shape as logged links: full `PASSWORD_RESET_URL_BASE` + encoded **`token`**) applies only under **`EMAIL_MODE=console`** and when **`PASSWORD_RESET_RETURN_RESET_URL`** / **`NODE_ENV`** allow it (typically enabled in development; production defaults suppress it unless you set **`PASSWORD_RESET_RETURN_RESET_URL=true`**). Omit for unknown emails and for SMTP mode.
       requestBody:
         required: true
         content:
@@ -930,6 +931,14 @@ components:
         message:
           type: string
           example: If an account exists for that email, you will receive password reset instructions.
+        reset_url:
+          type: string
+          format: uri
+          description: |
+            Present when console email mode emits reset links in forgot-password responses: account exists under **email**, and server's rules allow returning the URL (see **`PASSWORD_RESET_RETURN_RESET_URL`** and **`NODE_ENV`** in deployment docs).
+            Full SPA deep link: **`PASSWORD_RESET_URL_BASE`** plus URL-encoded **`token`** query.
+            Omit under **`EMAIL_MODE=smtp`**, when no account matched, or when the server suppresses JSON links (typical **`NODE_ENV=production`** defaults).
+          example: http://localhost:5173/reset-password?token=REPLACE_WITH_RAW_TOKEN
     ResetPasswordRequest:
       type: object
       required:

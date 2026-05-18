@@ -12,7 +12,7 @@ import {
   rotateRefresh,
   storeRefresh,
 } from "../auth/refreshSession";
-import { env } from "../config/env";
+import { env, includeForgotPasswordResetUrlInBody } from "../config/env";
 import { consumeAdminInvite } from "../db/adminInviteQueries";
 import {
   consumePasswordResetToken,
@@ -28,7 +28,7 @@ import {
   updateUserProfileById,
   type UserPublicRow,
 } from "../db/userQueries";
-import { sendPasswordResetEmail } from "../email/sendPasswordReset";
+import { buildPasswordResetUrl, sendPasswordResetEmail } from "../email/sendPasswordReset";
 import { HttpError } from "../http/httpError";
 import { authenticate } from "../http/authMiddleware";
 import { logger } from "../logger";
@@ -248,11 +248,18 @@ authRouter.post(
 
       const email = parsed.data.email.trim().toLowerCase();
       const userId = await selectUserIdByEmail(pool, email);
+      const genericMessage =
+        "If an account exists for that email, you will receive password reset instructions.";
+
+      let reset_url: string | undefined;
       if (userId) {
         const { rawToken } = await createPasswordResetToken({
           userId,
           ttlHours: env.PASSWORD_RESET_TOKEN_TTL_HOURS,
         });
+        if (includeForgotPasswordResetUrlInBody()) {
+          reset_url = buildPasswordResetUrl(rawToken);
+        }
         try {
           await sendPasswordResetEmail({ to: email, rawToken });
         } catch (err) {
@@ -261,8 +268,8 @@ authRouter.post(
       }
 
       res.status(202).json({
-        message:
-          "If an account exists for that email, you will receive password reset instructions.",
+        message: genericMessage,
+        ...(reset_url !== undefined ? { reset_url } : {}),
       });
     } catch (err) {
       next(err);
