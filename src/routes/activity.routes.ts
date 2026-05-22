@@ -3,9 +3,12 @@ import { ZodError, z } from "zod";
 
 import {
   DuplicateDailyActivityConflict,
+  deleteDailyActivityById,
+  deleteDailyActivityByIds,
   insertDailyActivity,
   paginateDailyActivity,
   selectAgentUserIdForDailyActivity,
+  selectAgentUserIdsForDailyActivityIds,
   selectDailyActivityById,
   updateDailyActivityPartial,
   type DailyActivityListFilters,
@@ -58,6 +61,12 @@ const dailyActivityBodySchema = z
     applications_count: z.coerce.number().int().nonnegative(),
     loan_amount: z.coerce.number().finite().nonnegative(),
     update_date: isoDateSchema,
+  })
+  .strict();
+
+const bulkDeleteDailyActivityBodySchema = z
+  .object({
+    daily_activity_ids: z.array(z.string().uuid()).min(1).max(100),
   })
   .strict();
 
@@ -202,6 +211,55 @@ activityRouter.post(
   }
 );
 
+activityRouter.post(
+  "/daily/delete",
+  authenticate,
+  async (req, res, next) => {
+    try {
+      const parsed = bulkDeleteDailyActivityBodySchema.safeParse(req.body ?? {});
+      if (!parsed.success) throw mapZodError(parsed.error);
+
+      const auth = req.auth;
+      if (!auth) {
+        throw new HttpError(401, "Not authenticated");
+      }
+
+      const isAdmin = auth.roles.includes("admin");
+      const isAgentEligible =
+        auth.roles.includes("user") && !auth.roles.includes("admin");
+
+      if (!isAdmin && !isAgentEligible) {
+        throw new HttpError(403, "Insufficient permissions");
+      }
+
+      const uniqueIds = [...new Set(parsed.data.daily_activity_ids)];
+      const ownerById = await selectAgentUserIdsForDailyActivityIds(uniqueIds);
+
+      for (const id of uniqueIds) {
+        const ownerId = ownerById.get(id);
+        if (ownerId === undefined) {
+          throw new HttpError(404, "Daily activity not found");
+        }
+        if (!isAdmin && ownerId !== auth.userId) {
+          throw new HttpError(
+            403,
+            "You can only delete your own daily activity",
+          );
+        }
+      }
+
+      const deletedCount = await deleteDailyActivityByIds(uniqueIds);
+
+      res.status(200).json({
+        deleted_count: deletedCount,
+        daily_activity_ids: uniqueIds,
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
 activityRouter.patch(
   "/daily/:daily_activity_id",
   authenticate,
@@ -254,6 +312,51 @@ activityRouter.patch(
       });
 
       res.status(200).json({ daily_activity });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+activityRouter.delete(
+  "/daily/:daily_activity_id",
+  authenticate,
+  async (req, res, next) => {
+    try {
+      const uuidSchema = z.string().uuid();
+      const idParsed = uuidSchema.safeParse(req.params.daily_activity_id ?? "");
+      if (!idParsed.success) {
+        throw new HttpError(422, "Invalid daily_activity_id: UUID expected");
+      }
+      const activityId = idParsed.data;
+
+      const auth = req.auth;
+      if (!auth) {
+        throw new HttpError(401, "Not authenticated");
+      }
+
+      const isAdmin = auth.roles.includes("admin");
+      const isAgentEligible =
+        auth.roles.includes("user") && !auth.roles.includes("admin");
+
+      if (!isAdmin && !isAgentEligible) {
+        throw new HttpError(403, "Insufficient permissions");
+      }
+
+      const ownerId = await selectAgentUserIdForDailyActivity(activityId);
+      if (ownerId === null) {
+        throw new HttpError(404, "Daily activity not found");
+      }
+
+      if (!isAdmin && ownerId !== auth.userId) {
+        throw new HttpError(
+          403,
+          "You can only delete your own daily activity",
+        );
+      }
+
+      await deleteDailyActivityById(activityId);
+      res.status(204).send();
     } catch (err) {
       next(err);
     }

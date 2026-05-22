@@ -371,6 +371,167 @@ describe.skipIf(!SHOULD_RUN_ACTIVITY)("Activity /activity integration", () => {
     });
   });
 
+  describe("DELETE /activity/daily/:daily_activity_id", () => {
+    it("204 when agent deletes own row then GET 404", async () => {
+      const agent = await signupAgent();
+      const created = await request(app)
+        .post("/activity/daily")
+        .set("Authorization", `Bearer ${agent.token}`)
+        .send(dailyBody(agent, { update_date: "2026-12-01" }));
+      expect(created.status).toBe(201);
+      const id = created.body.daily_activity.id as string;
+
+      await request(app)
+        .delete(`/activity/daily/${id}`)
+        .set("Authorization", `Bearer ${agent.token}`)
+        .expect(204);
+
+      const gone = await request(app)
+        .get(`/activity/daily/${id}`)
+        .set("Authorization", `Bearer ${agent.token}`);
+      expect(gone.status).toBe(404);
+    });
+
+    it("403 when agent deletes another row admin succeeds", async () => {
+      const adminToken = await signupAdminOnlyToken();
+      const a = await signupAgent();
+      const b = await signupAgent();
+
+      const rowB = await request(app)
+        .post("/activity/daily")
+        .set("Authorization", `Bearer ${b.token}`)
+        .send(dailyBody(b, { update_date: "2026-12-10" }))
+        .expect(201);
+      const idB = rowB.body.daily_activity.id as string;
+
+      const forbidden = await request(app)
+        .delete(`/activity/daily/${idB}`)
+        .set("Authorization", `Bearer ${a.token}`);
+      expect(forbidden.status).toBe(403);
+
+      await request(app)
+        .delete(`/activity/daily/${idB}`)
+        .set("Authorization", `Bearer ${adminToken}`)
+        .expect(204);
+    });
+  });
+
+  describe("POST /activity/daily/delete", () => {
+    it("200 agent bulk deletes deduped own rows", async () => {
+      const agent = await signupAgent();
+
+      const c1 = await request(app)
+        .post("/activity/daily")
+        .set("Authorization", `Bearer ${agent.token}`)
+        .send(dailyBody(agent, { update_date: "2026-12-20" }))
+        .expect(201);
+      const c2 = await request(app)
+        .post("/activity/daily")
+        .set("Authorization", `Bearer ${agent.token}`)
+        .send(dailyBody(agent, { update_date: "2026-12-21" }))
+        .expect(201);
+      const id1 = c1.body.daily_activity.id as string;
+      const id2 = c2.body.daily_activity.id as string;
+
+      const res = await request(app)
+        .post("/activity/daily/delete")
+        .set("Authorization", `Bearer ${agent.token}`)
+        .send({ daily_activity_ids: [id1, id2, id1] });
+
+      expect(res.status).toBe(200);
+      expect(res.body.deleted_count).toBe(2);
+      expect(res.body.daily_activity_ids).toEqual([id1, id2]);
+
+      await request(app)
+        .get(`/activity/daily/${id1}`)
+        .set("Authorization", `Bearer ${agent.token}`)
+        .expect(404);
+    });
+
+    it("403 when agent includes another user's id", async () => {
+      const a = await signupAgent();
+      const b = await signupAgent();
+
+      const rowA = await request(app)
+        .post("/activity/daily")
+        .set("Authorization", `Bearer ${a.token}`)
+        .send(dailyBody(a, { update_date: "2026-12-22" }))
+        .expect(201);
+      const rowB = await request(app)
+        .post("/activity/daily")
+        .set("Authorization", `Bearer ${b.token}`)
+        .send(dailyBody(b, { update_date: "2026-12-23" }))
+        .expect(201);
+
+      const res = await request(app)
+        .post("/activity/daily/delete")
+        .set("Authorization", `Bearer ${a.token}`)
+        .send({
+          daily_activity_ids: [rowA.body.daily_activity.id, rowB.body.daily_activity.id],
+        });
+      expect(res.status).toBe(403);
+
+      await request(app)
+        .get(`/activity/daily/${rowA.body.daily_activity.id}`)
+        .set("Authorization", `Bearer ${a.token}`)
+        .expect(200);
+    });
+
+    it("404 when any id is unknown", async () => {
+      const agent = await signupAgent();
+      const created = await request(app)
+        .post("/activity/daily")
+        .set("Authorization", `Bearer ${agent.token}`)
+        .send(dailyBody(agent, { update_date: "2026-12-24" }))
+        .expect(201);
+      const id = created.body.daily_activity.id as string;
+
+      const res = await request(app)
+        .post("/activity/daily/delete")
+        .set("Authorization", `Bearer ${agent.token}`)
+        .send({
+          daily_activity_ids: [id, randomUUID()],
+        });
+      expect(res.status).toBe(404);
+
+      await request(app)
+        .get(`/activity/daily/${id}`)
+        .set("Authorization", `Bearer ${agent.token}`)
+        .expect(200);
+    });
+
+    it("admin deletes rows for two agents in one request", async () => {
+      const adminToken = await signupAdminOnlyToken();
+      const a = await signupAgent();
+      const b = await signupAgent();
+
+      const rowA = await request(app)
+        .post("/activity/daily")
+        .set("Authorization", `Bearer ${a.token}`)
+        .send(dailyBody(a, { update_date: "2026-12-25" }))
+        .expect(201);
+      const rowB = await request(app)
+        .post("/activity/daily")
+        .set("Authorization", `Bearer ${b.token}`)
+        .send(dailyBody(b, { update_date: "2026-12-26" }))
+        .expect(201);
+
+      const idA = rowA.body.daily_activity.id as string;
+      const idB = rowB.body.daily_activity.id as string;
+
+      await request(app)
+        .post("/activity/daily/delete")
+        .set("Authorization", `Bearer ${adminToken}`)
+        .send({ daily_activity_ids: [idA, idB] })
+        .expect(200);
+
+      await request(app)
+        .get(`/activity/daily/${idA}`)
+        .set("Authorization", `Bearer ${adminToken}`)
+        .expect(404);
+    });
+  });
+
   describe("GET /activity/daily/:daily_activity_id", () => {
     it("agent reads own row; 403 other agent row; admin reads any", async () => {
       const adminToken = await signupAdminOnlyToken();

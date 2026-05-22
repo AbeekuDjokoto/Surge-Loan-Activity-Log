@@ -262,6 +262,38 @@ export async function selectAgentUserIdForDailyActivity(
   return rows[0]?.agent_user_id ?? null;
 }
 
+/** Row id → owning agent id for rows that exist (subset of `ids`). */
+export async function selectAgentUserIdsForDailyActivityIds(
+  ids: string[]
+): Promise<Map<string, string>> {
+  if (ids.length === 0) return new Map();
+  const { rows } = await pool.query<{ id: string; agent_user_id: string }>(
+    `
+    SELECT id, agent_user_id
+    FROM daily_activity
+    WHERE id = ANY($1::uuid[])
+    `,
+    [ids]
+  );
+  return new Map(rows.map((r) => [r.id, r.agent_user_id]));
+}
+
+export async function deleteDailyActivityById(activityId: string): Promise<boolean> {
+  const { rowCount } = await pool.query(`DELETE FROM daily_activity WHERE id = $1::uuid`, [
+    activityId,
+  ]);
+  return (rowCount ?? 0) > 0;
+}
+
+export async function deleteDailyActivityByIds(ids: string[]): Promise<number> {
+  if (ids.length === 0) return 0;
+  const { rowCount } = await pool.query(
+    `DELETE FROM daily_activity WHERE id = ANY($1::uuid[])`,
+    [ids]
+  );
+  return rowCount ?? 0;
+}
+
 export type PatchDailyActivityInput = {
   activityId: string;
   applicationsCount?: number | undefined;
